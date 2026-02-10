@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Platform</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 3rem 2rem;
+            text-align: center;
+        }
+        header h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        header p { font-size: 1.2rem; opacity: 0.9; }
+        .tabs {
+            display: flex;
+            flex-wrap: wrap;
+            background: #f7f9fc;
+            border-bottom: 2px solid #e0e7ef;
+            padding: 0 1rem;
+        }
+        .tab {
+            padding: 1rem 1.5rem;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #64748b;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+            white-space: nowrap;
+        }
+        .tab:hover { color: #667eea; }
+        .tab.active { color: #667eea; border-bottom-color: #667eea; }
+        .content { padding: 2rem; }
+        .panel { display: none; }
+        .panel.active { display: block; }
+        body.loading .panel { display: block; visibility: hidden; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .chart-box {
+            background: #f7f9fc;
+            padding: 2rem;
+            border-radius: 10px;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+        .chart-box svg { max-width: 100%; height: auto; }
+        .info {
+            background: #f0f4f8;
+            padding: 1.5rem;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            margin-bottom: 2rem;
+        }
+        .info h3 { color: #1e293b; margin-bottom: 0.5rem; }
+        .info p { color: #64748b; line-height: 1.6; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+        .card {
+            background: white;
+            border: 2px solid #e0e7ef;
+            padding: 1.5rem;
+            border-radius: 10px;
+            transition: all 0.3s;
+        }
+        .card:hover {
+            border-color: #667eea;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.1);
+            transform: translateY(-5px);
+        }
+        .card h4 { color: #667eea; margin-bottom: 0.5rem; }
+        .card p { color: #64748b; font-size: 0.9rem; }
+        .json-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+        .json-row pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 1rem;
+            border-radius: 8px;
+            font-size: 0.82rem;
+            overflow-x: auto;
+            line-height: 1.5;
+        }
+        .json-row h4 { margin-bottom: 0.5rem; }
+        @media (max-width: 700px) { .json-row { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body class="loading">
+<div class="container">
+    <header>
+        <h1>AI Trading Platform</h1>
+        <p>Interactive System Architecture &amp; Workflow Documentation</p>
+    </header>
+    <div class="tabs">
+        <button class="tab active" onclick="show('t1',this)">System Architecture</button>
+        <button class="tab" onclick="show('t2',this)">Prediction Flow</button>
+        <button class="tab" onclick="show('t3',this)">JSON Pipeline</button>
+        <button class="tab" onclick="show('t4',this)">Workflow</button>
+    </div>
+    <div class="content">
+
+        <!-- ==================== TAB 1 ==================== -->
+        <div id="t1" class="panel active">
+            <div class="info">
+                <h3>5-Layer System Architecture</h3>
+                <p>Microservices architecture with clear separation: presentation layer (React), API gateway (Flask), message queue (RabbitMQ), ML workers (Python), and storage (PostgreSQL).</p>
+            </div>
+            <div class="chart-box"><div class="mermaid">
+graph TB
+    subgraph L1["Frontend - React"]
+        U1[Trader Dashboard]
+        U2[Investor Dashboard]
+        U3[Manager Dashboard]
+        U4[Quant Dashboard]
+    end
+    subgraph L2["API Gateway - Flask"]
+        A1["POST /predict"]
+        A2["POST /trade-signal"]
+        A3["POST /create-model"]
+    end
+    subgraph L3["Message Queue - RabbitMQ"]
+        Q1[rpc_queue]
+        Q2[result_queue]
+    end
+    subgraph L4["Workers - Python ML"]
+        W1[Data Loader] --> W2[Feature Engine]
+        W2 --> W3[LSTM Model]
+        W3 --> W4[Signal Generator]
+    end
+    subgraph L5["Storage"]
+        DB[(PostgreSQL)]
+        FS[Model Weights]
+    end
+    L1 --> L2
+    L2 --> L3
+    L3 --> L4
+    L4 --> L5
+    style L1 fill:#E8F5E9,stroke:#4CAF50
+    style L2 fill:#E3F2FD,stroke:#2196F3
+    style L3 fill:#FFF3E0,stroke:#FF9800
+    style L4 fill:#F3E5F5,stroke:#9C27B0
+    style L5 fill:#FFEBEE,stroke:#F44336
+            </div></div>
+            <div class="grid">
+                <div class="card"><h4>Frontend</h4><p>React/Next.js with TypeScript. 4 user segment dashboards with forms, charts, and real-time updates.</p></div>
+                <div class="card"><h4>API Gateway</h4><p>Flask REST API with Pydantic schema validation, JWT auth, and RabbitMQ RPC client.</p></div>
+                <div class="card"><h4>Message Queue</h4><p>RabbitMQ decouples API from workers, enables horizontal scaling, and provides reliability.</p></div>
+                <div class="card"><h4>ML Workers</h4><p>Python workers with PyTorch LSTM models, feature engineering, and signal generation.</p></div>
+                <div class="card"><h4>Storage</h4><p>PostgreSQL for metadata and audit trail, file system for model weights and historical CSV data.</p></div>
+            </div>
+        </div>
+
+        <!-- ==================== TAB 2 ==================== -->
+        <div id="t2" class="panel">
+            <div class="info">
+                <h3>Prediction Request Flow</h3>
+                <p>End-to-end sequence from user form submission to prediction result display, showing all system components and their interactions.</p>
+            </div>
+            <div class="chart-box"><div class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant FE as Frontend
+    participant API as Flask API
+    participant MQ as RabbitMQ
+    participant W as Worker
+    participant ML as LSTM Model
+    participant DB as PostgreSQL
+    U->>FE: Fill prediction form
+    FE->>FE: Validate input
+    FE->>API: POST /api/v1/predict
+    API->>API: Validate schema
+    API->>MQ: Publish to rpc_queue
+    MQ->>W: Consume request
+    W->>W: Load market data
+    W->>W: Compute features
+    W->>ML: Run inference
+    ML->>W: Return prediction
+    W->>W: Generate trade signal
+    W->>W: Generate suggestion text
+    W->>DB: Save prediction
+    W->>MQ: Publish to result_queue
+    MQ->>API: Consume result
+    API->>FE: Return JSON response
+    FE->>U: Display result and chart
+            </div></div>
+        </div>
+
+        <!-- ==================== TAB 3 ==================== -->
+        <div id="t3" class="panel">
+            <div class="info">
+                <h3>JSON Input-Output Contract</h3>
+                <p>Simple 3-box diagram showing the complete JSON transformation: User Configuration → Processing Pipeline → System Response. This is the API contract with exact field names matching your image.</p>
+            </div>
+            <div class="chart-box"><div class="mermaid">
+graph LR
+    A["User JSON Configuration<br/>{<br/>  'user_segment': <br/>    'short_term_trader',<br/>  'stocks': ['AAPL', 'MSFT'],<br/>  'data_frequency': '1min',<br/>  'prediction_horizon': '1h',<br/>  'confidence_level': 0.7,<br/>  'entry_window':<br/>    {'start':'10:00','end':'11:30'},<br/>  'exit_window': {'end':'14:00'},<br/>  'entry_price': 185.50,<br/>  'stop_loss': 182.00,<br/>  'capital_at_risk': 0.02,<br/>  'features':<br/>    ['SMA','EMA','MACD','volatility'],<br/>  'sentiment_enabled': true,<br/>  'model_preferences': {<br/>    'architecture': 'LSTM',<br/>    'epochs': 20<br/>  }<br/>}"]
+    B["Processing Pipeline"]
+    C["System JSON Response<br/>{<br/>  'predicted_price': 187.25,<br/>  'confidence': 0.85,<br/>  'trade_signal': 'Enter',<br/>  'direction': 'Long',<br/>  'suggested_exit_time':<br/>    '14:00',<br/>  'position_size': 200,<br/>  'suggestion_text': 'Entering <br/>    LONG on AAPL<br/>    at $185.50 with stop-loss <br/>    $182.00.<br/>    Trade size: 200 shares.<br/>    Confidence: 0.85.',<br/>  'risk_metrics': {<br/>    'max_loss': '$700',<br/>    'risk_reward_ratio': 1.5<br/>  }<br/>}"]
+    
+    A --> B
+    B --> C
+    
+    style A fill:#e8f5e9,stroke:#4CAF50,stroke-width:2px
+    style B fill:#f3e5f5,stroke:#9C27B0,stroke-width:2px
+    style C fill:#e3f2fd,stroke:#2196F3,stroke-width:2px
+            </div></div>
+            <div class="grid">
+                <div class="card"><h4>User Configuration (13 fields)</h4><p>User segment, stocks list, timing (data frequency, prediction horizon, entry/exit windows), risk parameters (confidence level, stop loss, capital at risk), features selection, sentiment analysis toggle, model preferences.</p></div>
+                <div class="card"><h4>Processing Pipeline (6 steps)</h4><p>Validate Schema → Load Market Data → Compute Technical Features (SMA, EMA, MACD, volatility) → Run LSTM Model → Generate Trade Signals → Calculate Risk Metrics.</p></div>
+                <div class="card"><h4>System Response (8 fields)</h4><p>Price prediction, confidence score, trade signal (Enter/Exit/Hold), direction (Long/Short), suggested exit time, position size, human-readable suggestion text, risk metrics (max loss, risk/reward ratio).</p></div>
+                <div class="card"><h4>End-to-End Flow</h4><p>Complete JSON-to-JSON transformation showing exactly what the frontend sends and what the backend returns. This is the API contract between UI and ML pipeline.</p></div>
+            </div>
+            <div class="info" style="margin-top:2rem; border-left-color:#9C27B0;">
+                <h3>JSON Examples</h3>
+                <div class="json-row">
+                    <div>
+                        <h4 style="color:#4CAF50;">User JSON Configuration</h4>
+                        <pre>{
+  'user_segment': 
+    'short_term_trader',
+  'stocks': ['AAPL', 'MSFT'],
+  'data_frequency': '1min',
+  'prediction_horizon': '1h',
+  'confidence_level': 0.7,
+  'entry_window':
+    {'start':'10:00','end':'11:30'},
+  'exit_window': {'end':'14:00'},
+  'entry_price': 185.50,
+  'stop_loss': 182.00,
+  'capital_at_risk': 0.02,
+  'features':
+    ['SMA','EMA','MACD','volatility'],
+  'sentiment_enabled': true,
+  'model_preferences': {
+    'architecture': 'LSTM',
+    'epochs': 20
+  }
+}</pre>
+                    </div>
+                    <div>
+                        <h4 style="color:#2196F3;">System JSON Response</h4>
+                        <pre>{
+  'predicted_price': 187.25,
+  'confidence': 0.85,
+  'trade_signal': 'Enter',
+  'direction': 'Long',
+  'suggested_exit_time':
+    '14:00',
+  'position_size': 200,
+  'suggestion_text': 'Entering 
+    LONG on AAPL
+    at $185.50 with stop-loss 
+    $182.00.
+    Trade size: 200 shares.
+    Confidence: 0.85.',
+  'risk_metrics': {
+    'max_loss': '$700',
+    'risk_reward_ratio': 1.5
+  }
+}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== TAB 4 ==================== -->
+        <div id="t4" class="panel">
+            <div class="info">
+                <h3>Full Application Workflow - Inference + Creation + Marketplace</h3>
+                <p>Complete state machine showing two workflows: <strong>Inference</strong> (synchronous predictions using custom-trained models built on pre-trained LSTM), and <strong>Creation</strong> (asynchronous agent training with external market data). Users need zero AI knowledge - the platform handles all ML complexity.</p>
+            </div>
+            <div class="chart-box"><div class="mermaid">
+stateDiagram-v2
+    [*] --> Idle: Application Start
+    Idle --> Authenticating: User Opens App
+    Authenticating --> Login: Not Authenticated
+    Authenticating --> Dashboard: Token Valid
+    Login --> Authenticating: Submit Credentials
+
+    Dashboard --> InferenceForm: Run Prediction
+    Dashboard --> AgentBuilder: Create AI Agent
+    Dashboard --> HistoryView: View History
+    Dashboard --> Logout: Logout
+    Logout --> Idle: Invalidate JWT
+    HistoryView --> Dashboard: Back
+
+    state INFERENCE {
+        InferenceForm --> SelectAgent: Choose Agent
+        SelectAgent --> InferenceValidation: Submit
+        InferenceValidation --> InferenceForm: Validation Failed
+        InferenceValidation --> InferenceAPI: Validation Passed
+        InferenceAPI --> RateLimitCheck: POST predict
+        RateLimitCheck --> RateLimitError: Limit Exceeded
+        RateLimitCheck --> CacheCheck: Limit OK
+        RateLimitError --> WaitRetry: Return 429
+        WaitRetry --> InferenceAPI: Retry
+        CacheCheck --> CachedResult: Cache Hit
+        CacheCheck --> InferenceQueue: Cache Miss
+        InferenceQueue --> FetchLiveData: Publish to RabbitMQ
+        FetchLiveData --> ComputeFeatures: Refinitiv API
+        ComputeFeatures --> RunModel: SMA EMA MACD
+        RunModel --> ConfidenceCheck: LSTM Prediction
+        ConfidenceCheck --> LowConfidence: Below 0.60
+        ConfidenceCheck --> GenerateSignal: Above 0.60
+        LowConfidence --> GenerateSignal: Add Warning
+        GenerateSignal --> PositionSizing: BUY SELL HOLD
+        PositionSizing --> BuildSuggestion: Calculate Size
+        BuildSuggestion --> SavePrediction: Generate Text
+        SavePrediction --> PublishResult: Save to DB
+        CachedResult --> DisplayResults: Return Cache
+        PublishResult --> DisplayResults: Return via RabbitMQ
+    }
+
+    state CREATION {
+        AgentBuilder --> ConfigureAgent: New Agent Form
+        ConfigureAgent --> SelectEquity: Pick Stock or Equity
+        SelectEquity --> SelectDataSource: Refinitiv or Bloomberg
+        SelectDataSource --> SetDateRange: Choose Training Period
+        SetDateRange --> SelectFeatures: Pick Indicators
+        SelectFeatures --> SetRiskParams: Risk Preferences
+        SetRiskParams --> ReviewConfig: Review Settings
+        ReviewConfig --> ConfigureAgent: Edit Config
+        ReviewConfig --> SubmitTraining: Confirm and Submit
+        SubmitTraining --> TrainingQueue: POST create-agent
+        TrainingQueue --> FetchHistoricalData: Publish to RabbitMQ
+        FetchHistoricalData --> DataValidation: External API Call
+        DataValidation --> TrainingFailed: Bad or Missing Data
+        DataValidation --> InitializeModel: Data OK
+        InitializeModel --> TrainingLoop: Build LSTM Architecture
+        TrainingLoop --> EvaluateModel: Epochs Complete
+        EvaluateModel --> TrainingFailed: Does Not Converge
+        EvaluateModel --> SaveAgent: Meets Threshold
+        TrainingFailed --> NotifyUserFailed: Set FAILED in DB
+        NotifyUserFailed --> AgentBuilder: User Notified
+        SaveAgent --> SetAgentReady: Save Weights to Storage
+        SetAgentReady --> NotifyUserSuccess: Set READY in DB
+        NotifyUserSuccess --> AgentReady: User Notified
+        AgentReady --> Dashboard: Agent Available for Inference
+    }
+
+    DisplayResults --> Dashboard: Back to Dashboard
+            </div></div>
+            <div class="grid">
+                <div class="card"><h4>Inference (Synchronous)</h4><p>User selects their custom-trained agent, submits prediction request. System fetches live data via Refinitiv, computes features, runs custom-trained model (built on pre-trained LSTM), returns signal in seconds.</p></div>
+                <div class="card"><h4>Creation (Asynchronous)</h4><p>User configures agent (equity, data source, date range, features, risk params). Training job queued to RabbitMQ. Worker fetches historical data, trains LSTM. Takes minutes to hours.</p></div>
+                <div class="card"><h4>Training Lifecycle</h4><p>Submit → Queue → Fetch Data → Validate → Initialize Model → Training Loop → Evaluate. If fails: set FAILED in DB, notify user. If succeeds: save weights, set READY, notify user.</p></div>
+                <div class="card"><h4>User Needs Zero AI Knowledge</h4><p>The form is finance-focused: pick stocks, date ranges, indicators. System handles all ML complexity (architecture, hyperparameters, training). User only sees results and performance metrics.</p></div>
+                <div class="card"><h4>Data Sources</h4><p>System fetches data from Refinitiv or Bloomberg APIs automatically. Historical data for training, live data for inference. User never uploads data manually.</p></div>
+                <div class="card"><h4>Connection: Creation feeds Inference</h4><p>Agents created in the Creation workflow become available in the Inference workflow. Both share the same database - Creation writes agent weights, Inference reads them.</p></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+    mermaid.initialize({ 
+        startOnLoad: false,
+        theme: 'default', 
+        securityLevel: 'loose'
+    });
+    
+    window.addEventListener('load', function() {
+        setTimeout(function() {
+            mermaid.run().then(function() {
+                document.body.classList.remove('loading');
+            }).catch(function() {
+                document.body.classList.remove('loading');
+            });
+        }, 300);
+    });
+    
+    function show(id, btn) {
+        document.querySelectorAll('.panel').forEach(function(el) { el.classList.remove('active'); });
+        document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
+        document.getElementById(id).classList.add('active');
+        btn.classList.add('active');
+    }
+</script>
+</body>
+</html>
