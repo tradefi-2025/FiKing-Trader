@@ -11,7 +11,11 @@ FiKing Trader is an AI trading platform that allows users to:
 
 ## Architecture Documentation
 
-📊 **[View Full Architecture](docs/architecture.html)** - Open this HTML file in your browser to see:
+📊 **[🌐 View Full Architecture (Live)](https://htmlpreview.github.io/?https://github.com/tradefi-2025/FiKing-Trader/blob/main/docs/architecture.html)** - Click to view interactive diagrams in your browser
+
+Or download and open locally: [docs/architecture.html](docs/architecture.html)
+
+**Interactive Diagrams Include:**
 - System Architecture (5-layer design)
 - Prediction Flow (sequence diagram)
 - JSON Input-Output Contract
