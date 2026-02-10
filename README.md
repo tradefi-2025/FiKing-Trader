@@ -36,16 +36,16 @@ Currently contains:
 - **Queue**: RabbitMQ (async job processing)
 - **Workers**: Python workers (LSTM training, inference)
 - **Storage**: PostgreSQL (agent metadata, predictions, user data)
-- **ML**: PyTorch/TensorFlow (LSTM models, pre-trained base models)
+- **ML**: PyTorch/TensorFlow (multiple architectures: LSTM, CNN, Transformer, pre-trained base models)
 - **Data Sources**: Refinitiv API, Bloomberg API (market data)
 
 ## Workflows
 
 ### 1. Inference (Synchronous)
-User selects custom-trained agent → System fetches live market data → Computes features → Runs LSTM → Returns trade signal in seconds
+User selects custom-trained agent → System fetches live market data → Computes features → Runs AI model (LSTM/CNN/Transformer) → Returns trade signal in seconds
 
 ### 2. Creation (Asynchronous)
-User configures agent (equity, date range, features, risk params) → Training job queued → Worker fetches historical data → Trains LSTM → Evaluates → Saves weights or fails → Notifies user
+User configures agent (equity, date range, features, risk params) → Training job queued → Worker fetches historical data → Trains AI model with selected architecture → Evaluates → Saves weights or fails → Notifies user
 
 ## Getting Started
 
