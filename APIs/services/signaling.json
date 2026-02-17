@@ -1,0 +1,112 @@
+{
+  "endpoint": "POST /model/create",
+  "description": "Creates and configures a forecasting model instance with optional news and sentiment integration. The model is trained asynchronously based on user-defined market parameters and deployed for automated signal generation.",
+
+  "request_schema": {
+    "create": {
+      "entity_name": {
+        "type": "string",
+        "required": true,
+        "description": "Identifier of the financial instrument or entity to model. Must match one of the entries defined in configs/entities.json."
+      },
+      "time_frequency": {
+        "type": "string",
+        "required": true,
+        "description": "Time resolution of the input data (e.g., 1MIN, 5MIN, 1H, 1D). Must match one of the values defined in configs/time_frequencies.json."
+      },
+      "observation_horizon": {
+        "type": "integer",
+        "required": true,
+        "description": "Number of past time steps used as input features for the forecasting model."
+      },
+      "prediction_horizon": {
+        "type": "integer",
+        "required": true,
+        "description": "Number of time steps ahead to forecast. The model predicts P_(t + prediction_horizon)."
+      },
+      "news_observation_horizon": {
+        "type": "integer",
+        "required": false,
+        "description": "Number of past time steps scanned for relevant news and textual data."
+      },
+      "news_retrieval_prompt": {
+        "type": "string",
+        "required": false,
+        "description": "Natural language query specifying the topic or sentiment profile of retrieved news."
+      },
+      "news_resources": {
+        "type": "array[string]",
+        "required": false,
+        "description": "List of approved news sources defined in configs/news_resources.json."
+      },
+      "confidence_level": {
+        "type": "float",
+        "required": false,
+        "description": "Minimum prediction confidence required to emit a trading signal. Must be between 0.0 and 1.0."
+      },
+      "signal_frequency": {
+        "type": "integer",
+        "required": true,
+        "description": "Frequency (in time steps) at which the model evaluates whether to generate a signal."
+      }
+    }
+  },
+
+  "response_schema": {
+    "status": {
+      "type": "string",
+      "description": "Indicates whether the request was accepted or rejected.",
+      "possible_values": ["ACCEPTED", "REJECTED"]
+    },
+    "valid": {
+      "type": "boolean",
+      "description": "True if the request passed validation and model training has been initiated."
+    },
+    "model_id": {
+      "type": "string",
+      "description": "Unique identifier of the created model instance. Returned only if status = ACCEPTED."
+    },
+    "message": {
+      "type": "string",
+      "description": "Detailed explanation of the request result. If rejected, includes the validation failure reason. If accepted, confirms asynchronous training start."
+    },
+    "input_summary": {
+      "type": "string",
+      "description": "Human-readable description of the configured model, summarizing observed data, forecasting horizon, and signal generation logic."
+    }
+  },
+
+  "validation_rules": {
+    "entity_name": "Must exist in configs/entities.json",
+    "time_frequency": "Must exist in configs/time_frequencies.json",
+    "news_resources": "Each resource must exist in configs/news_resources.json",
+    "confidence_level": "Must be between 0.0 and 1.0",
+    "observation_horizon": "Must be > 0",
+    "prediction_horizon": "Must be > 0",
+    "signal_frequency": "Must be > 0"
+  },
+
+  "behavioral_notes": [
+    "If news-related parameters are omitted, the model is trained without textual or sentiment features.",
+    "Model training is executed asynchronously after successful validation.",
+    "Signal generation depends on both confidence_level and signal_frequency.",
+    "Rejected requests return detailed validation error messages.",
+    "The input_summary is automatically generated to provide a natural-language explanation of the model configuration."
+  ],
+
+  "example_success_response": {
+    "status": "ACCEPTED",
+    "valid": true,
+    "model_id": "mdl_874392A",
+    "message": "Request validated successfully. Model training has been initiated asynchronously.",
+    "input_summary": "The agent observes the price movements of AAPL at a 5MIN frequency over the last 120 time steps. It incorporates relevant macroeconomic news retrieved from Reuters and Bloomberg over the past 24 hours. Based on this information, the model forecasts the price 5 time steps ahead and evaluates signal generation every 5 time steps, issuing signals only when the confidence level exceeds 0.75."
+  },
+
+  "example_rejection_response": {
+    "status": "REJECTED",
+    "valid": false,
+    "model_id": null,
+    "message": "Validation failed: time_frequency '2MIN' is not defined in configs/time_frequencies.json.",
+    "input_summary": null
+  }
+}
