@@ -109,4 +109,5 @@
     "message": "Validation failed: time_frequency '2MIN' is not defined in configs/time_frequencies.json.",
     "input_summary": null
   }
+
 }
