@@ -1,0 +1,6 @@
+# Requirements for MongoDB Database Handler
+# Install with: pip install -r requirements-mongodb.txt
+
+pymongo>=4.3.0
+python-dotenv>=0.19.0
+numpy>=1.23.0

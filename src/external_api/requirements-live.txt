@@ -1,0 +1,6 @@
+# Requirements for Refinitiv Live Data Service
+# Install with: pip install -r requirements-live.txt
+
+requests>=2.28.0
+websocket-client>=1.4.0
+python-dotenv>=0.19.0

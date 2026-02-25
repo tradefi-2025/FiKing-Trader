@@ -1,0 +1,5 @@
+# Requirements for PostgreSQL Database Handler
+# Install with: pip install -r requirements-postgres.txt
+
+psycopg2-binary>=2.9.0
+python-dotenv>=0.19.0
