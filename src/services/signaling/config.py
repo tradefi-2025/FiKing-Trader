@@ -13,3 +13,5 @@ class SignalingConfig:
     activation = nn.GELU()
     lr: float = 0.001  # learning rate alias
     epoch: int = 100  # number of training epochs
+    default_frequency: int = 60  # seconds
+    default_confidence_level: float = 0.95
