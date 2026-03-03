@@ -8,10 +8,19 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-
+import pika
 # Load environment variables
 load_dotenv()
 
+def verify(body, service):
+    """
+    Verify the request body for model creation
+    
+    Args:
+        body: Request JSON body
+        service: Service type (e.g., 'signaling', 'forecasting')
+    """
+    pass
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +28,7 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)
+
 
 # Configuration
 app.config['JSON_SORT_KEYS'] = False
@@ -44,8 +54,8 @@ def get_status():
 
 # ==================== Model/Agent Management ====================
 
-@app.route('/model/create', methods=['POST'])
-def create_model():
+@app.route('/model/<service>/create', methods=['POST'])
+def create_model(service):
     """
     Create and configure a forecasting model instance
     
@@ -69,10 +79,33 @@ def create_model():
 
     """
     body = request.get_json()
-    service = body.get('service')
-    
-    pass
+    if verify(body, service) == False:
+        return jsonify({
+            'status': 'REJECTED',
+            'valid': False,
+            'message': 'Invalid request body. Please check the required fields and formats.'
+        }), 400
 
+    queue = f'{service}_training_queue'
+    pika_connection = pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost')))
+    channel = pika_connection.channel()
+    channel.queue_declare(queue=queue, durable=True)
+    channel.basic_publish(
+        exchange='',
+        routing_key=queue,
+        body=str(body),
+        properties=pika.BasicProperties(
+            delivery_mode=2,  # Make message persistent
+        )
+    )
+
+    return jsonify({
+        'status': 'ACCEPTED',
+        'valid': True,
+        'message': 'Model creation request accepted and queued for processing.'
+    }), 202
+
+    
 
 @app.route('/model/<model_id>/start', methods=['POST'])
 def start_model(model_id):

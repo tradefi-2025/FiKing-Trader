@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class PostgreSQLService:
+class   PostgreSQLService:
     """Generic PostgreSQL database service for basic operations"""
     
     def __init__(self, 

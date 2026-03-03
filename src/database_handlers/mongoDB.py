@@ -26,7 +26,8 @@ from pymongo.errors import (
 )
 from bson import ObjectId
 from dotenv import load_dotenv
-import pickle
+import io
+import torch
 import numpy as np
 
 # Load environment variables
@@ -165,7 +166,7 @@ class MongoDBService:
         Args:
             agent_id: Unique identifier for the agent
             agent_name: Name of the agent
-            weights: Model weights (will be serialized with pickle)
+            weights: Model weights (PyTorch state_dict or tensor dictionary)
             version: Model version
             equity: Associated equity symbol
             metadata: Additional metadata
@@ -175,8 +176,10 @@ class MongoDBService:
             True if successful, False otherwise
         """
         try:
-            # Serialize weights
-            weights_bytes = pickle.dumps(weights)
+            # Serialize weights using torch.save for better compatibility and security
+            buffer = io.BytesIO()
+            torch.save(weights, buffer)
+            weights_bytes = buffer.getvalue()
             
             agent_data = {
                 'agent_id': agent_id,
@@ -220,8 +223,9 @@ class MongoDBService:
             result = self.db['agents_weights'].find_one({'agent_id': agent_id})
             
             if result:
-                # Deserialize weights
-                weights = pickle.loads(result['weights_data'])
+                # Deserialize weights using torch.load
+                buffer = io.BytesIO(result['weights_data'])
+                weights = torch.load(buffer, weights_only=True)
                 
                 return {
                     'agent_id': result['agent_id'],

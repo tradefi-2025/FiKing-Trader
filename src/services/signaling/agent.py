@@ -6,7 +6,7 @@ import os
 import pika
 from dotenv import load_dotenv
 from ...database_handlers.mongoDB import MongoDBService
-from ...database_handlers.postgres import PostgresHandler
+from ...database_handlers.postgres import PostgreSQLService
 from .config import SignalingConfig
 
 load_dotenv()
@@ -37,6 +37,8 @@ class Agent:
         self.stop_event.set()  # Initially stopped
         self.inference_thread = None
         self.main_loop_thread = None
+        self.mongo_service = MongoDBService()
+        self.postgres_service = PostgreSQLService()
     
     def _get_rabbitmq_connection(self):
         """Create RabbitMQ connection"""
@@ -49,11 +51,11 @@ class Agent:
         return pika.BlockingConnection(parameters)
 
     def build_and_store(self):
-        dataloader = self.dl.fetch_training_dataloader_data()
+        dataloader,test_dataset = self.dl.fetch_training_dataloader_data()
         self.model.fit(dataloader)
         # Store the model (e.g., save to disk or database)
-        MongoDBHandler.save_model(self.model, self.meta_data)
-        PostgresHandler.update_model_metadata({'status': 'trained'}, self.meta_data['model_id'])
+        self.mongo_service.save_agent_weights(agent_id=self.meta_data['agent_id'], weights=self.model.state_dict())
+        self.postgres_service.update_model_metadata({'status': 'trained'}, self.meta_data['agent_id'])
 
     
     def launch(self):
@@ -182,7 +184,7 @@ class Agent:
         This loop runs indefinitely, fetching new data at the specified frequency,
         making predictions with the model, and verifying those predictions.
         """
-        freq = self.meta_data.get('frequency', self.config.default_frequency)
+        freq = self.meta_data.get('signal_frequency', self.config.default_frequency)
         
         while not self.stop_event.is_set():
             try:
