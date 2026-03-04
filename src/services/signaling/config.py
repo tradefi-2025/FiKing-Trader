@@ -15,3 +15,4 @@ class SignalingConfig:
     epoch: int = 100  # number of training epochs
     default_frequency: int = 60  # seconds
     default_confidence_level: float = 0.95
+    step_size: int = 1  # sliding window step — 1 means every candle, 2 means every other, etc.
