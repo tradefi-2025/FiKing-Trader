@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
-from config import SignalingConfig
+from .config import SignalingConfig
 
 class SignalingModelV1(nn.Module):
 

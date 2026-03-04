@@ -8,9 +8,10 @@ Each service should define its own table structure and handle data transformatio
 Environment Variables Required:
 - POSTGRES_HOST: Database host (default: localhost)
 - POSTGRES_PORT: Database port (default: 5432)
-- POSTGRES_DATABASE: Database name
+- POSTGRES_DB: Database name
 - POSTGRES_USER: Database user
 - POSTGRES_PASSWORD: Database password
+- POSTGRES_SSLMODE: SSL mode (default: prefer)
 """
 
 import os
@@ -42,6 +43,7 @@ class   PostgreSQLService:
                  database: str = None,
                  user: str = None,
                  password: str = None,
+                 sslmode: str = None,
                  min_connections: int = 1,
                  max_connections: int = 10):
         """
@@ -50,17 +52,19 @@ class   PostgreSQLService:
         Args:
             host: Database host (loads from POSTGRES_HOST if not provided)
             port: Database port (loads from POSTGRES_PORT if not provided)
-            database: Database name (loads from POSTGRES_DATABASE if not provided)
+            database: Database name (loads from POSTGRES_DB if not provided)
             user: Database user (loads from POSTGRES_USER if not provided)
             password: Database password (loads from POSTGRES_PASSWORD if not provided)
+            sslmode: SSL mode (loads from POSTGRES_SSLMODE if not provided)
             min_connections: Minimum connections in pool
             max_connections: Maximum connections in pool
         """
         self.host = host or os.getenv('POSTGRES_HOST', 'localhost')
         self.port = port or int(os.getenv('POSTGRES_PORT', 5432))
-        self.database = database or os.getenv('POSTGRES_DATABASE')
+        self.database = database or os.getenv('POSTGRES_DB')
         self.user = user or os.getenv('POSTGRES_USER')
         self.password = password or os.getenv('POSTGRES_PASSWORD')
+        self.sslmode = sslmode or os.getenv('POSTGRES_SSLMODE', 'prefer')
         
         if not all([self.database, self.user, self.password]):
             raise ValueError("Database name, user, and password are required. "
@@ -79,7 +83,8 @@ class   PostgreSQLService:
                 port=self.port,
                 database=self.database,
                 user=self.user,
-                password=self.password
+                password=self.password,
+                sslmode=self.sslmode
             )
             logger.info(f"✅ Connected to PostgreSQL: {self.database}@{self.host}")
         except Exception as e:

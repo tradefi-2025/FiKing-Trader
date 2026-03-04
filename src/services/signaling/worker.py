@@ -259,7 +259,7 @@ class SignalingWorker:
 
             # Create dataloader object
             logger.info("Creating dataloader...")
-            dataloader = SignalingDataLoader(metadata=metadata_dataloader)
+            dataloader = SignalingDataLoader(metadata=metadata_dataloader,config=self.config)
             
             # Create model object
             logger.info("Creating model...")
@@ -438,7 +438,7 @@ class SignalingWorker:
                 try:
                     # Parse the training request
                     request_data = json.loads(body)
-                    model_id = request_data.get('model_id', 'unknown')
+                    model_id = request_data.get('agent_id', 'unknown')
                     logger.info(f"📥 Received training request: {model_id}")
                     
                     # Clean up finished threads before checking limit

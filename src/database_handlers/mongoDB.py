@@ -95,29 +95,44 @@ class MongoDBService:
     # Supported time frequencies
     SUPPORTED_FREQUENCIES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M']
     
-    def __init__(self, uri: str = None, database: str = None):
+    def __init__(self, host: str = None, database: str = None, 
+                 username: str = None, password: str = None):
         """
         Initialize MongoDB service
         
         Args:
-            uri: MongoDB connection URI (loads from MONGODB_URI env var if not provided)
-            database: Database name (loads from MONGODB_DATABASE env var if not provided)
+            host: MongoDB host (loads from MONGO_HOST env var if not provided)
+            database: Database name (loads from MONGO_DATABASE env var if not provided)
+            username: MongoDB username (loads from MONGO_USERNAME env var if not provided)
+            password: MongoDB password (loads from MONGO_PASSWORD env var if not provided)
         """
-        self.uri = uri or os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-        self.database_name = database or os.getenv('MONGODB_DATABASE', 'fiking_trader')
+        self.host = host or os.getenv('MONGO_HOST', 'localhost')
+        self.database_name = database or os.getenv('MONGO_DATABASE', 'admin')
+        self.username = username or os.getenv('MONGO_USERNAME')
+        self.password = password or os.getenv('MONGO_PASSWORD')
         
         self.client = None
         self.db = None
         self._connect()
     
     def _connect(self):
-        """Establish connection to MongoDB"""
+        """Establish connection to MongoDB using credentials from environment"""
         try:
+            # Build connection URI based on available credentials
+            if self.username and self.password:
+                self.uri = (
+                    f"mongodb+srv://{self.username}:{self.password}"
+                    f"@{self.host}/{self.database_name}"
+                    f"?tls=true&authSource=admin"
+                )
+            else:
+                self.uri = f"mongodb://{self.host}:27017/"
+            
             self.client = MongoClient(self.uri, serverSelectionTimeoutMS=5000)
             # Test connection
             self.client.admin.command('ping')
             self.db = self.client[self.database_name]
-            logger.info(f"✅ Connected to MongoDB: {self.database_name}")
+            logger.info(f"✅ Connected to MongoDB: {self.database_name}@{self.host}")
             self._setup_indexes()
         except ConnectionFailure as e:
             logger.error(f"❌ Failed to connect to MongoDB: {str(e)}")

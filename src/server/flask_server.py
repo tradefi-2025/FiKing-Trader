@@ -4,9 +4,9 @@ Handles requests for agent management, predictions, and data operations
 """
 
 import os
+import json
 import logging
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from dotenv import load_dotenv
 import pika
 # Load environment variables
@@ -20,14 +20,13 @@ def verify(body, service):
         body: Request JSON body
         service: Service type (e.g., 'signaling', 'forecasting')
     """
-    pass
+    return True
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
 
 
 # Configuration
@@ -78,14 +77,17 @@ def create_model(service):
         - input_summary: Human-readable configuration description*
 
     """
+
     body = request.get_json()
     if verify(body, service) == False:
         return jsonify({
             'status': 'REJECTED',
             'valid': False,
-            'message': 'Invalid request body. Please check the required fields and formats.'
+            'message': 'Invalid request body. Please check the required fields and formats.',
+            'service': service
         }), 400
 
+    print(f"Received model creation request for service: {service} with body: {body}")
     queue = f'{service}_training_queue'
     pika_connection = pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost')))
     channel = pika_connection.channel()
@@ -93,7 +95,7 @@ def create_model(service):
     channel.basic_publish(
         exchange='',
         routing_key=queue,
-        body=str(body),
+        body=json.dumps(body),
         properties=pika.BasicProperties(
             delivery_mode=2,  # Make message persistent
         )
