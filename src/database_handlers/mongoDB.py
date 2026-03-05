@@ -1,681 +1,164 @@
 """
 MongoDB Database Handler
-Manages agent weights storage and time series datasets for equities
 
-Database Structure:
-- agents_weights: Collection for storing trained model weights
-- timeseries_{frequency}: Collections for time series data at different frequencies
-  (e.g., timeseries_1m, timeseries_5m, timeseries_1h, timeseries_1d)
-
-Environment Variables Required:
-- MONGODB_URI: MongoDB connection string
-- MONGODB_DATABASE: Database name (defaults to 'fiking_trader')
+Collections:
+- news_articles: { _id, Date, Stock_symbol, Article, Article_title, Publisher,
+                   Category, Date_parsed, embedding, ... }
+- timeseries_{freq}: { name (equity), file (pickled DataFrame) }
+- agents_weights: { agent_id, weights_data (torch-serialized) }
 """
 
 import os
+import io
+import pickle
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass, asdict
-from pymongo import MongoClient, ASCENDING, DESCENDING
-from pymongo.errors import (
-    ConnectionFailure, 
-    OperationFailure, 
-    DuplicateKeyError,
-    PyMongoError
-)
-from bson import ObjectId
-from dotenv import load_dotenv
-import io
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
 import torch
-import numpy as np
+from pymongo import MongoClient, DESCENDING
+from pymongo.errors import ConnectionFailure
+from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class AgentWeights:
-    """Data class for agent model weights"""
-    agent_id: str
-    agent_name: str
-    version: str
-    weights_data: bytes  # Serialized weights
-    metadata: Dict[str, Any]
-    equity: Optional[str] = None
-    training_date: Optional[datetime] = None
-    performance_metrics: Optional[Dict[str, float]] = None
-    created_at: datetime = None
-    updated_at: datetime = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.updated_at is None:
-            self.updated_at = datetime.now()
-
-
-@dataclass
-class TimeSeriesData:
-    """Data class for time series market data"""
-    equity: str
-    frequency: str  # e.g., '1m', '5m', '15m', '1h', '1d'
-    timestamp: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: int
-    additional_data: Optional[Dict[str, Any]] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary with formatted values"""
-        data = {
-            "equity": self.equity,
-            "frequency": self.frequency,
-            "timestamp": self.timestamp,
-            "open": f"{self.open:.2f}",
-            "high": f"{self.high:.2f}",
-            "low": f"{self.low:.2f}",
-            "close": f"{self.close:.2f}",
-            "volume": self.volume
-        }
-        if self.additional_data:
-            data["additional_data"] = self.additional_data
-        return data
-
-
 class MongoDBService:
-    """Service for MongoDB database operations"""
-    
-    # Supported time frequencies
+
     SUPPORTED_FREQUENCIES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M']
-    
-    def __init__(self, host: str = None, database: str = None, 
-                 username: str = None, password: str = None):
-        """
-        Initialize MongoDB service
-        
-        Args:
-            host: MongoDB host (loads from MONGO_HOST env var if not provided)
-            database: Database name (loads from MONGO_DATABASE env var if not provided)
-            username: MongoDB username (loads from MONGO_USERNAME env var if not provided)
-            password: MongoDB password (loads from MONGO_PASSWORD env var if not provided)
-        """
-        self.host = host or os.getenv('MONGO_HOST', 'localhost')
-        self.database_name = database or os.getenv('MONGO_DATABASE', 'admin')
-        self.username = username or os.getenv('MONGO_USERNAME')
-        self.password = password or os.getenv('MONGO_PASSWORD')
-        
+
+    def __init__(self):
+        self.host = os.getenv('MONGO_HOST', 'localhost')
+        self.database_name = os.getenv('MONGO_DATABASE', 'admin')
+        self.username = os.getenv('MONGO_USERNAME')
+        self.password = os.getenv('MONGO_PASSWORD')
         self.client = None
         self.db = None
         self._connect()
-    
+
     def _connect(self):
-        """Establish connection to MongoDB using credentials from environment"""
         try:
-            # Build connection URI based on available credentials
             if self.username and self.password:
-                self.uri = (
+                uri = (
                     f"mongodb+srv://{self.username}:{self.password}"
                     f"@{self.host}/{self.database_name}"
                     f"?tls=true&authSource=admin"
                 )
             else:
-                self.uri = f"mongodb://{self.host}:27017/"
-            
-            self.client = MongoClient(self.uri, serverSelectionTimeoutMS=5000)
-            # Test connection
+                uri = f"mongodb://{self.host}:27017/"
+            self.client = MongoClient(uri, serverSelectionTimeoutMS=5000)
             self.client.admin.command('ping')
             self.db = self.client[self.database_name]
-            logger.info(f"✅ Connected to MongoDB: {self.database_name}@{self.host}")
-            self._setup_indexes()
+            logger.info(f"✅ Connected to MongoDB: {self.database_name}")
         except ConnectionFailure as e:
-            logger.error(f"❌ Failed to connect to MongoDB: {str(e)}")
+            logger.error(f"❌ Failed to connect: {e}")
             raise
-        except Exception as e:
-            logger.error(f"❌ Unexpected error connecting to MongoDB: {str(e)}")
-            raise
-    
-    def _setup_indexes(self):
-        """Create indexes for optimized queries"""
-        try:
-            # Indexes for agent weights collection
-            weights_collection = self.db['agents_weights']
-            weights_collection.create_index([('agent_id', ASCENDING)], unique=True)
-            weights_collection.create_index([('agent_name', ASCENDING)])
-            weights_collection.create_index([('equity', ASCENDING)])
-            weights_collection.create_index([('created_at', DESCENDING)])
-            
-            # Indexes for time series collections
-            for freq in self.SUPPORTED_FREQUENCIES:
-                ts_collection = self.db[f'timeseries_{freq}']
-                # Compound index for efficient queries by equity and timestamp
-                ts_collection.create_index([
-                    ('equity', ASCENDING),
-                    ('timestamp', DESCENDING)
-                ])
-                ts_collection.create_index([('timestamp', DESCENDING)])
-                
-            logger.info("✅ Database indexes created successfully")
-        except Exception as e:
-            logger.warning(f"⚠️ Error creating indexes: {str(e)}")
-    
-    # ==================== Agent Weights Methods ====================
-    
-    def save_agent_weights(self, 
-                          agent_id: str,
-                          agent_name: str,
-                          weights: Any,
-                          version: str = "v1",
-                          equity: str = None,
-                          metadata: Dict[str, Any] = None,
-                          performance_metrics: Dict[str, float] = None) -> bool:
-        """
-        Save agent model weights to database
-        
-        Args:
-            agent_id: Unique identifier for the agent
-            agent_name: Name of the agent
-            weights: Model weights (PyTorch state_dict or tensor dictionary)
-            version: Model version
-            equity: Associated equity symbol
-            metadata: Additional metadata
-            performance_metrics: Training/evaluation metrics
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Serialize weights using torch.save for better compatibility and security
-            buffer = io.BytesIO()
-            torch.save(weights, buffer)
-            weights_bytes = buffer.getvalue()
-            
-            agent_data = {
-                'agent_id': agent_id,
-                'agent_name': agent_name,
-                'version': version,
-                'weights_data': weights_bytes,
-                'metadata': metadata or {},
-                'equity': equity,
-                'performance_metrics': performance_metrics or {},
-                'training_date': datetime.now(),
-                'updated_at': datetime.now()
-            }
-            
-            # Upsert operation
-            result = self.db['agents_weights'].update_one(
-                {'agent_id': agent_id},
-                {'$set': agent_data, '$setOnInsert': {'created_at': datetime.now()}},
-                upsert=True
-            )
-            
-            if result.upserted_id or result.modified_count > 0:
-                logger.info(f"✅ Saved weights for agent: {agent_id}")
-                return True
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Error saving agent weights: {str(e)}")
-            return False
-    
-    def load_agent_weights(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Load agent model weights from database
-        
-        Args:
-            agent_id: Unique identifier for the agent
-            
-        Returns:
-            Dictionary containing weights and metadata, or None if not found
-        """
-        try:
-            result = self.db['agents_weights'].find_one({'agent_id': agent_id})
-            
-            if result:
-                # Deserialize weights using torch.load
-                buffer = io.BytesIO(result['weights_data'])
-                weights = torch.load(buffer, weights_only=True)
-                
-                return {
-                    'agent_id': result['agent_id'],
-                    'agent_name': result['agent_name'],
-                    'version': result['version'],
-                    'weights': weights,
-                    'metadata': result.get('metadata', {}),
-                    'equity': result.get('equity'),
-                    'performance_metrics': result.get('performance_metrics', {}),
-                    'training_date': result.get('training_date'),
-                    'created_at': result.get('created_at'),
-                    'updated_at': result.get('updated_at')
-                }
-            
-            logger.warning(f"⚠️ Agent not found: {agent_id}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error loading agent weights: {str(e)}")
-            return None
-    
-    def list_agents(self, equity: str = None) -> List[Dict[str, Any]]:
-        """
-        List all agents, optionally filtered by equity
-        
-        Args:
-            equity: Filter by equity symbol
-            
-        Returns:
-            List of agent information dictionaries
-        """
-        try:
-            query = {'equity': equity} if equity else {}
-            
-            results = self.db['agents_weights'].find(
-                query,
-                {'weights_data': 0}  # Exclude heavy weights data
-            ).sort('updated_at', DESCENDING)
-            
-            agents = []
-            for result in results:
-                result['_id'] = str(result['_id'])  # Convert ObjectId to string
-                agents.append(result)
-            
-            return agents
-            
-        except Exception as e:
-            logger.error(f"❌ Error listing agents: {str(e)}")
-            return []
-    
-    def delete_agent_weights(self, agent_id: str) -> bool:
-        """
-        Delete agent weights from database
-        
-        Args:
-            agent_id: Unique identifier for the agent
-            
-        Returns:
-            True if deleted, False otherwise
-        """
-        try:
-            result = self.db['agents_weights'].delete_one({'agent_id': agent_id})
-            
-            if result.deleted_count > 0:
-                logger.info(f"✅ Deleted agent: {agent_id}")
-                return True
-            
-            logger.warning(f"⚠️ Agent not found: {agent_id}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Error deleting agent: {str(e)}")
-            return False
-    
-    # ==================== Time Series Methods ====================
-    
-    def save_timeseries_data(self, 
-                            equity: str,
-                            frequency: str,
-                            data_points: List[TimeSeriesData]) -> bool:
-        """
-        Save time series data for an equity at a specific frequency
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency (e.g., '1m', '5m', '1h', '1d')
-            data_points: List of TimeSeriesData objects
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if frequency not in self.SUPPORTED_FREQUENCIES:
-            logger.error(f"❌ Unsupported frequency: {frequency}")
-            return False
-        
-        try:
-            collection_name = f'timeseries_{frequency}'
-            collection = self.db[collection_name]
-            
-            # Convert data points to documents
-            documents = []
-            for data_point in data_points:
-                doc = {
-                    'equity': equity,
-                    'frequency': frequency,
-                    'timestamp': data_point.timestamp,
-                    'open': data_point.open,
-                    'high': data_point.high,
-                    'low': data_point.low,
-                    'close': data_point.close,
-                    'volume': data_point.volume,
-                    'additional_data': data_point.additional_data or {}
-                }
-                documents.append(doc)
-            
-            # Bulk insert with ordered=False to continue on duplicate key errors
-            if documents:
-                try:
-                    result = collection.insert_many(documents, ordered=False)
-                    logger.info(f"✅ Inserted {len(result.inserted_ids)} data points for {equity} at {frequency}")
-                except DuplicateKeyError:
-                    logger.warning(f"⚠️ Some duplicate entries skipped for {equity} at {frequency}")
-                
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Error saving time series data: {str(e)}")
-            return False
-    
-    def get_timeseries_data(self,
-                           equity: str,
-                           frequency: str,
-                           start_date: datetime = None,
-                           end_date: datetime = None,
-                           limit: int = None) -> List[Dict[str, Any]]:
-        """
-        Retrieve time series data for an equity
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency
-            start_date: Start date filter (optional)
-            end_date: End date filter (optional)
-            limit: Maximum number of records to return
-            
-        Returns:
-            List of time series data dictionaries
-        """
-        if frequency not in self.SUPPORTED_FREQUENCIES:
-            logger.error(f"❌ Unsupported frequency: {frequency}")
-            return []
-        
-        try:
-            collection_name = f'timeseries_{frequency}'
-            collection = self.db[collection_name]
-            
-            # Build query
-            query = {'equity': equity}
-            
-            if start_date or end_date:
-                query['timestamp'] = {}
-                if start_date:
-                    query['timestamp']['$gte'] = start_date
-                if end_date:
-                    query['timestamp']['$lte'] = end_date
-            
-            # Execute query
-            cursor = collection.find(query).sort('timestamp', DESCENDING)
-            
-            if limit:
-                cursor = cursor.limit(limit)
-            
-            # Convert to list and format
-            results = []
-            for doc in cursor:
-                doc['_id'] = str(doc['_id'])  # Convert ObjectId to string
-                # Format price values to 2 decimal places
-                doc['open'] = f"{doc['open']:.2f}"
-                doc['high'] = f"{doc['high']:.2f}"
-                doc['low'] = f"{doc['low']:.2f}"
-                doc['close'] = f"{doc['close']:.2f}"
-                results.append(doc)
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"❌ Error retrieving time series data: {str(e)}")
-            return []
-    
-    def get_latest_price(self, equity: str, frequency: str = '1m') -> Optional[Dict[str, Any]]:
-        """
-        Get the most recent price data for an equity
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency
-            
-        Returns:
-            Latest price data or None
-        """
-        data = self.get_timeseries_data(equity, frequency, limit=1)
-        return data[0] if data else None
-    
-    def list_equities(self, frequency: str = '1d') -> List[str]:
-        """
-        List all equities that have data in the database
-        
-        Args:
-            frequency: Time frequency to check
-            
-        Returns:
-            List of equity symbols
-        """
-        if frequency not in self.SUPPORTED_FREQUENCIES:
-            frequency = '1d'
-        
-        try:
-            collection_name = f'timeseries_{frequency}'
-            equities = self.db[collection_name].distinct('equity')
-            return sorted(equities)
-            
-        except Exception as e:
-            logger.error(f"❌ Error listing equities: {str(e)}")
-            return []
-    
-    def delete_timeseries_data(self, 
-                              equity: str,
-                              frequency: str,
-                              start_date: datetime = None,
-                              end_date: datetime = None) -> int:
-        """
-        Delete time series data for an equity
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency
-            start_date: Start date filter (optional, deletes all if not provided)
-            end_date: End date filter (optional)
-            
-        Returns:
-            Number of documents deleted
-        """
-        if frequency not in self.SUPPORTED_FREQUENCIES:
-            logger.error(f"❌ Unsupported frequency: {frequency}")
-            return 0
-        
-        try:
-            collection_name = f'timeseries_{frequency}'
-            collection = self.db[collection_name]
-            
-            # Build query
-            query = {'equity': equity}
-            
-            if start_date or end_date:
-                query['timestamp'] = {}
-                if start_date:
-                    query['timestamp']['$gte'] = start_date
-                if end_date:
-                    query['timestamp']['$lte'] = end_date
-            
-            result = collection.delete_many(query)
-            logger.info(f"✅ Deleted {result.deleted_count} records for {equity} at {frequency}")
-            
-            return result.deleted_count
-            
-        except Exception as e:
-            logger.error(f"❌ Error deleting time series data: {str(e)}")
-            return 0
-    
-    def get_data_statistics(self, equity: str, frequency: str) -> Dict[str, Any]:
-        """
-        Get statistics about stored time series data
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency
-            
-        Returns:
-            Dictionary with statistics
-        """
-        if frequency not in self.SUPPORTED_FREQUENCIES:
-            return {}
-        
-        try:
-            collection_name = f'timeseries_{frequency}'
-            collection = self.db[collection_name]
-            
-            # Get count
-            count = collection.count_documents({'equity': equity})
-            
-            # Get date range
-            oldest = collection.find_one(
-                {'equity': equity},
-                sort=[('timestamp', ASCENDING)]
-            )
-            newest = collection.find_one(
-                {'equity': equity},
-                sort=[('timestamp', DESCENDING)]
-            )
-            
-            stats = {
-                'equity': equity,
-                'frequency': frequency,
-                'total_records': count,
-                'oldest_date': oldest['timestamp'] if oldest else None,
-                'newest_date': newest['timestamp'] if newest else None
-            }
-            
-            return stats
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting statistics: {str(e)}")
-            return {}
-    
-    # ==================== Utility Methods ====================
-    
-    def get_connection_status(self) -> Dict[str, Any]:
-        """Get database connection status"""
-        try:
-            self.client.admin.command('ping')
-            
-            # Get database stats
-            stats = self.db.command('dbStats')
-            
-            return {
-                'connected': True,
-                'database': self.database_name,
-                'collections': self.db.list_collection_names(),
-                'size_mb': round(stats.get('dataSize', 0) / (1024 * 1024), 2),
-                'supported_frequencies': self.SUPPORTED_FREQUENCIES
-            }
-        except Exception as e:
-            return {
-                'connected': False,
-                'error': str(e)
-            }
-    
+
     def close(self):
-        """Close MongoDB connection"""
         if self.client:
             self.client.close()
-            logger.info("🔌 MongoDB connection closed")
 
+    # ==================== News Articles ====================
 
-# ==================== Example Usage ====================
+    def get_news(self, equity: str, start: datetime = None, 
+                 end: datetime = None, limit: int = None) -> List[Dict]:
+        """Fetch news articles for equity within date range."""
+        query = {'Stock_symbol': equity}
+        if start or end:
+            query['Date_parsed'] = {}
+            if start:
+                query['Date_parsed']['$gte'] = start
+            if end:
+                query['Date_parsed']['$lte'] = end
+
+        cursor = self.db['news_articles'].find(query).sort('Date_parsed', DESCENDING)
+        if limit:
+            cursor = cursor.limit(limit)
+        return [{**doc, '_id': str(doc['_id'])} for doc in cursor]
+
+    def get_news_embeddings(self, equity: str, start: datetime = None,
+                            end: datetime = None) -> pd.DataFrame:
+        """Return DataFrame with ['timestamp', 'embedding'] for equity."""
+        articles = self.get_news(equity, start, end)
+        rows = []
+        for doc in articles:
+            emb = doc.get('embedding')
+            if emb is not None:
+                rows.append({
+                    'timestamp': doc.get('Date_parsed') or doc.get('Date'),
+                    'embedding': torch.tensor(emb) if not isinstance(emb, torch.Tensor) else emb,
+                })
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['timestamp', 'embedding'])
+
+    # ==================== Time Series ====================
+
+    def get_timeseries(self, equity: str, frequency: str) -> Optional[pd.DataFrame]:
+        """Load pickled DataFrame for equity at frequency."""
+        doc = self.db[f'timeseries_{frequency}'].find_one({'name': equity})
+        if doc and 'file' in doc:
+            return pickle.loads(doc['file'])
+        return None
+
+    def save_timeseries(self, equity: str, frequency: str, df: pd.DataFrame) -> bool:
+        """Store DataFrame for equity at frequency."""
+        try:
+            self.db[f'timeseries_{frequency}'].update_one(
+                {'name': equity},
+                {'$set': {'name': equity, 'file': pickle.dumps(df)}},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error saving timeseries: {e}")
+            return False
+
+    def list_equities(self, frequency: str = '1d') -> List[str]:
+        """List equities with data at frequency."""
+        return sorted(self.db['news_articles'].distinct('Stock_symbol'))
+
+    # ==================== Agent Weights ====================
+
+    def get_weights(self, agent_id: str) -> Optional[Any]:
+        """Load torch weights for agent."""
+        doc = self.db['agents_weights'].find_one({'agent_id': agent_id})
+        if doc and 'weights_data' in doc:
+            return torch.load(io.BytesIO(doc['weights_data']), weights_only=True)
+        return None
+
+    def save_weights(self, agent_id: str, weights: Any) -> bool:
+        """Store torch weights for agent."""
+        try:
+            buf = io.BytesIO()
+            torch.save(weights, buf)
+            self.db['agents_weights'].update_one(
+                {'agent_id': agent_id},
+                {'$set': {'agent_id': agent_id, 'weights_data': buf.getvalue()}},
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error saving weights: {e}")
+            return False
+
+    def list_agents(self) -> List[str]:
+        """List all agent IDs."""
+        return [doc['agent_id'] for doc in self.db['agents_weights'].find({}, {'agent_id': 1})]
+
+    def delete_weights(self, agent_id: str) -> bool:
+        """Delete weights for agent."""
+        return self.db['agents_weights'].delete_one({'agent_id': agent_id}).deleted_count > 0
+
 
 def test_mongodb_service():
-    """Test function for MongoDB service"""
-    try:
-        # Initialize service
-        service = MongoDBService()
-        print("✅ MongoDB service initialized")
-        
-        # Test connection status
-        status = service.get_connection_status()
-        print(f"📋 Connection status: {status}")
-        
-        # Test saving agent weights
-        print("\n📦 Testing agent weights storage...")
-        dummy_weights = {
-            'layer1': np.random.randn(10, 10),
-            'layer2': np.random.randn(10, 5)
-        }
-        
-        success = service.save_agent_weights(
-            agent_id="test_agent_001",
-            agent_name="SignalingModelV1",
-            weights=dummy_weights,
-            version="v1.0",
-            equity="AAPL",
-            metadata={"architecture": "ResNet", "layers": 5},
-            performance_metrics={"accuracy": 0.85, "loss": 0.23}
-        )
-        print(f"  Save result: {'✅' if success else '❌'}")
-        
-        # Test loading agent weights
-        loaded = service.load_agent_weights("test_agent_001")
-        if loaded:
-            print(f"  ✅ Loaded agent: {loaded['agent_name']}")
-            print(f"  Performance: {loaded['performance_metrics']}")
-        
-        # Test time series data
-        print("\n📈 Testing time series storage...")
-        test_data = [
-            TimeSeriesData(
-                equity="AAPL",
-                frequency="1d",
-                timestamp=datetime(2026, 2, 24, 9, 30),
-                open=150.25,
-                high=152.80,
-                low=149.50,
-                close=151.75,
-                volume=1000000
-            ),
-            TimeSeriesData(
-                equity="AAPL",
-                frequency="1d",
-                timestamp=datetime(2026, 2, 25, 9, 30),
-                open=151.80,
-                high=153.20,
-                low=150.90,
-                close=152.50,
-                volume=1200000
-            )
-        ]
-        
-        success = service.save_timeseries_data("AAPL", "1d", test_data)
-        print(f"  Save result: {'✅' if success else '❌'}")
-        
-        # Retrieve time series data
-        retrieved = service.get_timeseries_data("AAPL", "1d", limit=5)
-        print(f"  ✅ Retrieved {len(retrieved)} data points")
-        if retrieved:
-            latest = retrieved[0]
-            print(f"  Latest: {latest['timestamp']} - Close: ${latest['close']}")
-        
-        # Get statistics
-        stats = service.get_data_statistics("AAPL", "1d")
-        print(f"  📊 Stats: {stats}")
-        
-        # List agents and equities
-        agents = service.list_agents()
-        print(f"\n👥 Total agents: {len(agents)}")
-        
-        equities = service.list_equities("1d")
-        print(f"📊 Equities with data: {equities}")
-        
-        # Clean up
-        service.close()
-        
-    except Exception as e:
-        print(f"❌ Test failed: {str(e)}")
-
-
+    service = MongoDBService()
+    # print("Equities:", service.list_equities())
+    print("Agents:", service.list_agents())
+    news = service.get_news("aapl", limit=2)
+    print("Sample News:", [n.get('embeddings') for n in news])
+    service.close()
+# Alias for dl.py compatibility
 if __name__ == "__main__":
     test_mongodb_service()
