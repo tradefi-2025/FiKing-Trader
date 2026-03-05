@@ -64,6 +64,7 @@ docker-compose.override.yml
 *.parquet
 Histories/
 data/
+news_data/
 
 # ML Models
 *.h5
