@@ -51,9 +51,10 @@ class Agent:
         return pika.BlockingConnection(parameters)
 
     def build_and_store(self):
-        dataloader,test_dataset = self.dl.fetch_training_dataloader_data()
+        dataloader,test_dataset = self.dl.fetch_dataloader()
         self.model.fit(dataloader)
         # Store the model (e.g., save to disk or database)
+        raise NotImplementedError("Model storage not implemented yet")
         self.mongo_service.save_agent_weights(agent_id=self.meta_data['agent_id'], weights=self.model.state_dict())
         self.postgres_service.update_model_metadata({'status': 'trained'}, self.meta_data['agent_id'])
 
