@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from .config import SignalingConfig
 from ...database_handlers.mongoDB import MongoDBHandler
 
-def fetch_news_embeddings(equity: str, From: int, To: int) -> torch.Tensor:
+def fetch_news_embeddings(equity: str,prompt: str, From,To) -> torch.Tensor:
     '''
     Fetch news articles related to the equity between the given timestamps, pass them through a large language model to get embeddings, and return a tensor of shape (N, embedding_dim) where N is the number of news articles.
     '''
@@ -13,7 +13,7 @@ def fetch_news_embeddings(equity: str, From: int, To: int) -> torch.Tensor:
     dummy_embeddings = torch.randn(10, 768)  # 10 news articles, 768-dimensional embeddings
     return dummy_embeddings
 
-def fetch_news_embeddings_dataset(equity: str, prompt: str, resources: list = None) -> pd.DataFrame:
+def fetch_news_embeddings_dataset(equity: str, prompt: str = "", resources: list = None) -> pd.DataFrame:
     '''
     Fetch news articles related to the equity from the given resources, pass them
     through a large language model guided by `prompt`, and return a DataFrame with
@@ -53,16 +53,26 @@ class SignalingDataLoader:
         # OHLCV / training parameters
         self.equity: str                 = metadata.get("equity")
         self.frequency: str              = metadata.get("time_frequency", "1h")
+        self.frequency_to_timedelta = {
+            "1m": pd.Timedelta(minutes=1),
+            "5m": pd.Timedelta(minutes=5),
+            "15m": pd.Timedelta(minutes=15),
+            "30m": pd.Timedelta(minutes=30),
+            "1h": pd.Timedelta(hours=1),
+            "4h": pd.Timedelta(hours=4),
+            "1d": pd.Timedelta(days=1),
+        }
         self.window_size: int            = metadata.get("observation_horizon", 50)
         self.prediction_horizon: int     = metadata.get("prediction_horizon", 1)
 
         # News / multimodal parameters
-        self.news_observation_horizon    = metadata.get("news_observation_horizon")
+        self.news_observation_horizon    = self.frequency_to_timedelta[self.frequency] * metadata.get("news_observation_horizon", 50)
         self.news_retrieval_prompt: str  = metadata.get("news_retrieval_prompt", "")
         self.news_resources: list        = metadata.get("news_resources", [])
 
         self.db = MongoDBHandler()
-    
+
+        
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
@@ -166,19 +176,20 @@ class SignalingDataLoader:
 
     def _align_news_to_windows(self, end_timestamps: list) -> torch.Tensor:
         """
-        For each OHLCV window, fetch the most recent news embedding whose
-        timestamp falls within that window's time range.
+        For each OHLCV window, collect ALL news embeddings whose timestamp
+        falls within [end_timestamp - news_observation_horizon, end_timestamp].
 
-        Uses pandas merge_asof (as-of join): for each end_timestamp of a window,
-        find the latest news article published at or before that timestamp.
         This ensures the model never sees future news — no data leakage.
+        Windows with fewer than N articles are zero-padded; windows with
+        more than N articles keep only the N most recent ones.
 
         Args:
             end_timestamps : list of timestamps, one per OHLCV window (length M)
 
         Returns:
-            torch.Tensor  shape (M, embedding_dim)
-            If no news found for a window, a zero vector is used as a placeholder.
+            torch.Tensor  shape (M, N, embedding_dim)
+            N = news_observation_horizon (max articles per window).
+            If fewer articles exist for a window, remaining slots are zero vectors.
         """
         news_df = fetch_news_embeddings_dataset(
             self.equity,
@@ -187,22 +198,36 @@ class SignalingDataLoader:
         )
         news_df = news_df.sort_values("timestamp").reset_index(drop=True)
 
-        # Build a DataFrame of window end-timestamps to join against
-        windows_df = pd.DataFrame({"timestamp": end_timestamps})
-        windows_df = windows_df.sort_values("timestamp").reset_index(drop=True)
-
-        # As-of join: each window gets the most recent news at or before its timestamp
-        aligned = pd.merge_asof(windows_df, news_df, on="timestamp", direction="backward")
-
         embedding_dim = news_df["embedding"].iloc[0].shape[0]
-        embeddings = []
-        for emb in aligned["embedding"]:
-            if emb is None or (isinstance(emb, float)):
-                embeddings.append(torch.zeros(embedding_dim))  # no news → zero vector
-            else:
-                embeddings.append(emb)
+        horizon = self.news_observation_horizon  # max news articles per window
 
-        return torch.stack(embeddings)  # (M, embedding_dim)
+
+        all_window_embeddings = []  # will hold M tensors of shape (N, embedding_dim)
+
+        for end_ts in end_timestamps:
+            start_ts = end_ts - horizon
+
+            # Filter news within [start_ts, end_ts] — no future leakage
+            mask = (news_df["timestamp"] >= start_ts) & (news_df["timestamp"] <= end_ts)
+            window_news = news_df.loc[mask].sort_values("timestamp", ascending=False)
+
+            # Collect embeddings (most recent first), cap at N
+            embs = []
+            for _, row in window_news.iterrows():
+                emb = row["embedding"]
+                if emb is None or isinstance(emb, float):
+                    embs.append(torch.zeros(embedding_dim))
+                else:
+                    embs.append(emb)
+
+            # Pad with zero vectors if fewer than N articles
+            if not len(embs):
+                embs.append(torch.zeros(embedding_dim))
+
+
+            all_window_embeddings.append(torch.stack(embs))  # (N, embedding_dim)
+
+        return all_window_embeddings  # (M, N, embedding_dim)
 
     def fetch_dataloader(self, large_model, train_ratio: float = 0.8):
         """
