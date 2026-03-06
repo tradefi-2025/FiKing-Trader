@@ -66,7 +66,7 @@ class MongoDBService:
     def get_news(self, equity: str, start: datetime = None, 
                  end: datetime = None, limit: int = None) -> List[Dict]:
         """Fetch news articles for equity within date range."""
-        query = {'Stock_symbol': equity}
+        query = {'Stock_symbol': equity.lower()}
         if start or end:
             query['Date_parsed'] = {}
             if start:
@@ -80,19 +80,28 @@ class MongoDBService:
         return [{**doc, '_id': str(doc['_id'])} for doc in cursor]
 
     def get_news_embeddings(self, equity: str, start: datetime = None,
-                            end: datetime = None) -> pd.DataFrame:
-        """Return DataFrame with ['timestamp', 'embedding'] for equity."""
+                            end: datetime = None) -> Dict[str, Any]:
+        """
+        Return dict with 'timestamps' (list) and 'embeddings' (stacked tensor).
+        
+        Returns:
+            {'timestamps': List[datetime], 'embeddings': Tensor (N, embedding_dim)}
+            Empty dict keys if no articles with embeddings found.
+        """
         articles = self.get_news(equity, start, end)
-        rows = []
+        timestamps = []
+        embeddings = []
         for doc in articles:
             emb = doc.get('embedding')
             if emb is not None:
-                rows.append({
-                    'timestamp': doc.get('Date_parsed') or doc.get('Date'),
-                    'embedding': torch.tensor(emb) if not isinstance(emb, torch.Tensor) else emb,
-                })
-        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['timestamp', 'embedding'])
+                timestamps.append(doc.get('Date_parsed') or doc.get('Date'))
+                embeddings.append(torch.tensor(emb) if not isinstance(emb, torch.Tensor) else emb)
+        
+        if embeddings:
+            return {'timestamps': timestamps, 'embeddings': torch.stack(embeddings)}
+        return {'timestamps': [], 'embeddings': torch.empty(0)}
 
+    
     # ==================== Time Series ====================
 
     def get_timeseries(self, equity: str, frequency: str) -> Optional[pd.DataFrame]:
@@ -151,6 +160,11 @@ class MongoDBService:
         """Delete weights for agent."""
         return self.db['agents_weights'].delete_one({'agent_id': agent_id}).deleted_count > 0
 
+    def get_stock_symbols_with_news(self) -> List[str]:
+        """Return list of stock symbols that have news articles."""
+        r=sorted(self.db['news_articles'].distinct('Stock_symbol'))
+        return {symbol:i for i,symbol in enumerate(r)}
+    
 
 def test_mongodb_service():
     service = MongoDBService()
@@ -161,4 +175,11 @@ def test_mongodb_service():
     service.close()
 # Alias for dl.py compatibility
 if __name__ == "__main__":
-    test_mongodb_service()
+    service = MongoDBService()
+    d=service.get_stock_symbols_with_news()
+    import json
+    #update the stock symbol in ../../configs/entities.json
+    with open('./configs/entities.json', 'w') as f:
+        json.dump(d, f, indent=4)
+
+
