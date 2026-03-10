@@ -12,11 +12,17 @@ import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
+from pathlib import Path
 import requests
 import pandas as pd
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from project root
+env_path = Path(__file__).resolve().parents[2] / ".env"
+print(f"Looking for .env at: {env_path}")
+print(f"File exists: {env_path.exists()}")
+load_dotenv(env_path)
+print(f"REFINITIV_API_KEY loaded: {bool(os.getenv('REFINITIV_API_KEY'))}")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -120,6 +126,15 @@ class RefinitivService:
         except Exception as e:
             logger.error(f"Error fetching {equity}: {e}")
             return None
+    def test_ohlc_fetch(self):
+        start= datetime.now() - timedelta(days=30)
+        end= datetime.now()
+        df= self.get_ohlc("AAPL.O", start, end)
+        if df is not None:
+            print(df.head())
+        else:
+            print("Failed to fetch OHLC data for AAPL.O")
+
 
     def get_past_year_ohlc(self, equity: str) -> Optional[pd.DataFrame]:
         """
@@ -145,6 +160,4 @@ class RefinitivService:
 
 if __name__ == "__main__":
     svc = RefinitivService()
-    df = svc.get_past_year_ohlc("AAPL")
-    if df is not None:
-        print(df.head())
+    df = svc.test_ohlc_fetch()
