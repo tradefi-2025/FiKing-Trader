@@ -12,22 +12,19 @@ Environment Variables Required:
 - MONGODB_DATABASE: Database name (defaults to 'fiking_trader')
 """
 
+import io
 import os
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass, asdict
-from pymongo import MongoClient, ASCENDING, DESCENDING
-from pymongo.errors import (
-    ConnectionFailure, 
-    OperationFailure, 
-    DuplicateKeyError,
-    PyMongoError
-)
-from bson import ObjectId
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+
+import pandas as pd
+import torch
+
+from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne as MongoUpdateOne
+from pymongo.errors import ConnectionFailure
 from dotenv import load_dotenv
-import pickle
-import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -35,27 +32,6 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class AgentWeights:
-    """Data class for agent model weights"""
-    agent_id: str
-    agent_name: str
-    version: str
-    weights_data: bytes  # Serialized weights
-    metadata: Dict[str, Any]
-    equity: Optional[str] = None
-    training_date: Optional[datetime] = None
-    performance_metrics: Optional[Dict[str, float]] = None
-    created_at: datetime = None
-    updated_at: datetime = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.updated_at is None:
-            self.updated_at = datetime.now()
 
 
 @dataclass
@@ -71,28 +47,24 @@ class TimeSeriesData:
     volume: int
     additional_data: Optional[Dict[str, Any]] = None
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary with formatted values"""
-        data = {
-            "equity": self.equity,
-            "frequency": self.frequency,
-            "timestamp": self.timestamp,
-            "open": f"{self.open:.2f}",
-            "high": f"{self.high:.2f}",
-            "low": f"{self.low:.2f}",
-            "close": f"{self.close:.2f}",
-            "volume": self.volume
-        }
-        if self.additional_data:
-            data["additional_data"] = self.additional_data
-        return data
-
 
 class MongoDBService:
     """Service for MongoDB database operations"""
     
     # Supported time frequencies
+    
     SUPPORTED_FREQUENCIES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M']
+
+    @staticmethod
+    def _normalize_candle_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize a raw MongoDB OHLCV document into JSON-friendly numerics."""
+        doc['_id'] = str(doc['_id'])
+        doc['open'] = float(doc['open'])
+        doc['high'] = float(doc['high'])
+        doc['low'] = float(doc['low'])
+        doc['close'] = float(doc['close'])
+        doc['volume'] = int(doc.get('volume', 0))
+        return doc
     
     def __init__(self, uri: str = None, database: str = None):
         """
@@ -138,12 +110,13 @@ class MongoDBService:
             # Indexes for time series collections
             for freq in self.SUPPORTED_FREQUENCIES:
                 ts_collection = self.db[f'timeseries_{freq}']
-                # Compound index for efficient queries by equity and timestamp
-                ts_collection.create_index([
-                    ('equity', ASCENDING),
-                    ('timestamp', DESCENDING)
-                ])
-                ts_collection.create_index([('timestamp', DESCENDING)])
+                # Unique compound index — one document per (equity, timestamp) candle.
+                # ASCENDING on timestamp so range queries walk the index forward.
+                ts_collection.create_index(
+                    [('equity', ASCENDING), ('timestamp', ASCENDING)],
+                    unique=True,
+                    name='equity_timestamp_unique'
+                )
                 
             logger.info("✅ Database indexes created successfully")
         except Exception as e:
@@ -165,7 +138,7 @@ class MongoDBService:
         Args:
             agent_id: Unique identifier for the agent
             agent_name: Name of the agent
-            weights: Model weights (will be serialized with pickle)
+            weights: Model weights (serialized via torch.save)
             version: Model version
             equity: Associated equity symbol
             metadata: Additional metadata
@@ -175,8 +148,11 @@ class MongoDBService:
             True if successful, False otherwise
         """
         try:
-            # Serialize weights
-            weights_bytes = pickle.dumps(weights)
+            # Serialize with torch.save — handles tensors, device maps, and
+            # custom classes correctly. pickle alone can break on GPU tensors.
+            buf = io.BytesIO()
+            torch.save(weights, buf)
+            weights_bytes = buf.getvalue()
             
             agent_data = {
                 'agent_id': agent_id,
@@ -220,8 +196,10 @@ class MongoDBService:
             result = self.db['agents_weights'].find_one({'agent_id': agent_id})
             
             if result:
-                # Deserialize weights
-                weights = pickle.loads(result['weights_data'])
+                # Deserialize with torch.load — mirrors torch.save above
+                weights = torch.load(
+                    io.BytesIO(result['weights_data']), weights_only=True
+                )
                 
                 return {
                     'agent_id': result['agent_id'],
@@ -296,62 +274,170 @@ class MongoDBService:
             logger.error(f"❌ Error deleting agent: {str(e)}")
             return False
     
+    # ==================== News / Embeddings Methods ====================
+
+    def get_news(self, equity: str, start: datetime = None,
+                 end: datetime = None, limit: int = None) -> List[Dict]:
+        """
+        Fetch news articles for an equity within a date range.
+        Articles are sorted most-recent first.
+        """
+        query = {'Stock_symbol': equity.lower()}
+        if start or end:
+            query['Date_parsed'] = {}
+            if start:
+                query['Date_parsed']['$gte'] = start
+            if end:
+                query['Date_parsed']['$lte'] = end
+
+        cursor = self.db['news_articles'].find(query).sort('Date_parsed', DESCENDING)
+        if limit:
+            cursor = cursor.limit(limit)
+        return [{**doc, '_id': str(doc['_id'])} for doc in cursor]
+
+    def get_news_embeddings(self, equity: str, start: datetime = None,
+                            end: datetime = None) -> Dict[str, Any]:
+        """
+        Return pre-computed embeddings for news articles aligned to a time range.
+
+        Returns a dict with:
+            'timestamps' : List[datetime]   — one per article that has an embedding
+            'embeddings' : torch.Tensor     — shape (N, embedding_dim), e.g. (N, 768)
+
+        Zero-tensor placeholder is returned when no articles with embeddings exist.
+        """
+        articles = self.get_news(equity, start, end)
+        timestamps, embeddings = [], []
+        for doc in articles:
+            emb = doc.get('embedding')
+            if emb is not None:
+                timestamps.append(doc.get('Date_parsed') or doc.get('Date'))
+                embeddings.append(
+                    emb if isinstance(emb, torch.Tensor) else torch.tensor(emb)
+                )
+        if embeddings:
+            return {'timestamps': timestamps, 'embeddings': torch.stack(embeddings)}
+        return {'timestamps': [], 'embeddings': torch.empty(0)}
+
     # ==================== Time Series Methods ====================
     
-    def save_timeseries_data(self, 
-                            equity: str,
-                            frequency: str,
-                            data_points: List[TimeSeriesData]) -> bool:
+    def save_timeseries_data(self,
+                             equity: str,
+                             frequency: str,
+                             data_points: List[TimeSeriesData]) -> bool:
         """
-        Save time series data for an equity at a specific frequency
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency (e.g., '1m', '5m', '1h', '1d')
-            data_points: List of TimeSeriesData objects
-            
-        Returns:
-            True if successful, False otherwise
+        Save candles for one equity at one frequency.
+
+        Uses a single bulk_write call — all upserts go in ONE round-trip to
+        MongoDB regardless of how many candles are in the batch.  A candle is
+        uniquely identified by (equity, timestamp) so the operation is fully
+        idempotent: re-running with the same data never creates duplicates.
+
+        For large backfills (e.g. 1-minute bars over 1 year ≈ 130 k candles)
+        this is orders of magnitude faster than one update_one() per candle.
         """
         if frequency not in self.SUPPORTED_FREQUENCIES:
             logger.error(f"❌ Unsupported frequency: {frequency}")
             return False
-        
+        if not data_points:
+            return False
+
         try:
-            collection_name = f'timeseries_{frequency}'
-            collection = self.db[collection_name]
-            
-            # Convert data points to documents
-            documents = []
-            for data_point in data_points:
-                doc = {
-                    'equity': equity,
-                    'frequency': frequency,
-                    'timestamp': data_point.timestamp,
-                    'open': data_point.open,
-                    'high': data_point.high,
-                    'low': data_point.low,
-                    'close': data_point.close,
-                    'volume': data_point.volume,
-                    'additional_data': data_point.additional_data or {}
-                }
-                documents.append(doc)
-            
-            # Bulk insert with ordered=False to continue on duplicate key errors
-            if documents:
-                try:
-                    result = collection.insert_many(documents, ordered=False)
-                    logger.info(f"✅ Inserted {len(result.inserted_ids)} data points for {equity} at {frequency}")
-                except DuplicateKeyError:
-                    logger.warning(f"⚠️ Some duplicate entries skipped for {equity} at {frequency}")
-                
-                return True
-            
-            return False
-            
+            operations = [
+                MongoUpdateOne(
+                    # Filter — the unique key for this candle
+                    {'equity': equity, 'timestamp': dp.timestamp},
+                    # Payload — create or overwrite all OHLCV fields
+                    {'$set': {
+                        'equity':    equity,
+                        'frequency': frequency,
+                        'timestamp': dp.timestamp,
+                        'open':      dp.open,
+                        'high':      dp.high,
+                        'low':       dp.low,
+                        'close':     dp.close,
+                        'volume':    dp.volume,
+                        **(dp.additional_data or {}),
+                    }},
+                    upsert=True,
+                )
+                for dp in data_points
+            ]
+
+            result = self.db[f'timeseries_{frequency}'].bulk_write(
+                operations, ordered=False
+            )
+            logger.info(
+                f"✅ {equity}/{frequency}: "
+                f"{result.upserted_count} new, {result.modified_count} updated "
+                f"({len(operations)} candles in 1 round-trip)"
+            )
+            return True
+
         except Exception as e:
-            logger.error(f"❌ Error saving time series data: {str(e)}")
+            logger.error(f"❌ Error saving timeseries: {e}")
             return False
+
+    def save_timeseries_df(self,
+                           equity: str,
+                           frequency: str,
+                           df: pd.DataFrame) -> bool:
+        """
+        Convenience wrapper: save a pandas DataFrame of OHLCV candles.
+
+        Expected columns: timestamp, open, high, low, close, volume
+        The DataFrame index is ignored — use the 'timestamp' column.
+        """
+        if frequency not in self.SUPPORTED_FREQUENCIES:
+            raise ValueError(f"Unsupported frequency: {frequency}")
+
+        # Accept either a 'timestamp' column or a datetime-like index.
+        if 'timestamp' not in df.columns:
+            if df.index.name == 'timestamp':
+                df = df.reset_index()
+            else:
+                raise ValueError(
+                    "DataFrame must contain a 'timestamp' column or have index named 'timestamp'"
+                )
+
+        required = {'timestamp', 'open', 'high', 'low', 'close', 'volume'}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"DataFrame missing columns: {missing}")
+
+        # Normalize timestamps to python datetime objects.
+        ts = pd.to_datetime(df['timestamp'], errors='raise')
+        # If tz-aware, convert to UTC and strip tzinfo for PyMongo.
+        if getattr(ts.dt, 'tz', None) is not None:
+            ts = ts.dt.tz_convert('UTC').dt.tz_localize(None)
+
+        df = df.copy()
+        df['timestamp'] = ts.dt.to_pydatetime()
+
+        data_points: List[TimeSeriesData] = []
+        for row in df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].itertuples(index=False):
+            data_points.append(
+                TimeSeriesData(
+                    equity=equity,
+                    frequency=frequency,
+                    timestamp=row.timestamp,
+                    open=float(row.open),
+                    high=float(row.high),
+                    low=float(row.low),
+                    close=float(row.close),
+                    volume=int(row.volume),
+                )
+            )
+
+        return self.save_timeseries_data(equity, frequency, data_points)
+
+    def df_datastore(self, df: pd.DataFrame, frequency: str, equity: str) -> bool:
+        """Store a DataFrame of OHLCV candles into MongoDB.
+
+        This is a convenience wrapper around `save_timeseries_df` that matches the
+        common call-site order: (df, frequency, equity).
+        """
+        return self.save_timeseries_df(equity=equity, frequency=frequency, df=df)
     
     def get_timeseries_data(self,
                            equity: str,
@@ -390,23 +476,16 @@ class MongoDBService:
                 if end_date:
                     query['timestamp']['$lte'] = end_date
             
-            # Execute query
-            cursor = collection.find(query).sort('timestamp', DESCENDING)
-            
+            # Execute query — sort ASCENDING so callers get chronological order
+            cursor = collection.find(query).sort('timestamp', ASCENDING)
+
             if limit:
                 cursor = cursor.limit(limit)
-            
-            # Convert to list and format
+
             results = []
             for doc in cursor:
-                doc['_id'] = str(doc['_id'])  # Convert ObjectId to string
-                # Format price values to 2 decimal places
-                doc['open'] = f"{doc['open']:.2f}"
-                doc['high'] = f"{doc['high']:.2f}"
-                doc['low'] = f"{doc['low']:.2f}"
-                doc['close'] = f"{doc['close']:.2f}"
-                results.append(doc)
-            
+                results.append(self._normalize_candle_doc(doc))
+
             return results
             
         except Exception as e:
@@ -415,17 +494,22 @@ class MongoDBService:
     
     def get_latest_price(self, equity: str, frequency: str = '1m') -> Optional[Dict[str, Any]]:
         """
-        Get the most recent price data for an equity
-        
-        Args:
-            equity: Equity symbol
-            frequency: Time frequency
-            
-        Returns:
-            Latest price data or None
+        Get the most recent candle for an equity.
+        Queries with DESCENDING sort so limit=1 gives the latest, not the oldest.
         """
-        data = self.get_timeseries_data(equity, frequency, limit=1)
-        return data[0] if data else None
+        if frequency not in self.SUPPORTED_FREQUENCIES:
+            return None
+        try:
+            doc = self.db[f'timeseries_{frequency}'].find_one(
+                {'equity': equity},
+                sort=[('timestamp', DESCENDING)],
+            )
+            if not doc:
+                return None
+            return self._normalize_candle_doc(doc)
+        except Exception as e:
+            logger.error(f"❌ Error getting latest price: {e}")
+            return None
     
     def list_equities(self, frequency: str = '1d') -> List[str]:
         """
@@ -560,6 +644,55 @@ class MongoDBService:
                 'connected': False,
                 'error': str(e)
             }
+
+    def check_ready(self) -> Dict[str, Any]:
+        """Verify DB connectivity and expected indexes.
+
+        Returns a dict with `ok` boolean plus `issues` and lightweight `details`.
+        """
+        issues: List[str] = []
+        details: Dict[str, Any] = {}
+
+        try:
+            self.client.admin.command('ping')
+        except Exception as e:
+            return {'ok': False, 'issues': [f"ping failed: {e}"], 'details': {}}
+
+        # agents_weights indexes
+        try:
+            weights_info = self.db['agents_weights'].index_information()
+            details['agents_weights_indexes'] = list(weights_info.keys())
+            has_agent_id_unique = any(
+                info.get('unique') is True and info.get('key') == [('agent_id', 1)]
+                for info in weights_info.values()
+            )
+            if not has_agent_id_unique:
+                issues.append("agents_weights missing unique index on agent_id")
+        except Exception as e:
+            issues.append(f"could not inspect agents_weights indexes: {e}")
+
+        # timeseries indexes
+        missing_ts_indexes: List[str] = []
+        for freq in self.SUPPORTED_FREQUENCIES:
+            coll_name = f'timeseries_{freq}'
+            try:
+                idx_info = self.db[coll_name].index_information()
+                has_unique = any(
+                    info.get('unique') is True
+                    and info.get('key') == [('equity', 1), ('timestamp', 1)]
+                    for info in idx_info.values()
+                )
+                if not has_unique:
+                    missing_ts_indexes.append(coll_name)
+            except Exception as e:
+                issues.append(f"could not inspect {coll_name} indexes: {e}")
+
+        if missing_ts_indexes:
+            issues.append(
+                "missing unique (equity, timestamp) index on: " + ", ".join(missing_ts_indexes)
+            )
+
+        return {'ok': len(issues) == 0, 'issues': issues, 'details': details}
     
     def close(self):
         """Close MongoDB connection"""
@@ -573,21 +706,25 @@ class MongoDBService:
 def test_mongodb_service():
     """Test function for MongoDB service"""
     try:
-        # Initialize service
+        # Initialize services
         service = MongoDBService()
         print("✅ MongoDB service initialized")
-        
+
+        # Quick readiness check (connectivity + expected indexes)
+        ready = service.check_ready()
+        print(f"🧪 Ready check: {ready}")
+
         # Test connection status
         status = service.get_connection_status()
         print(f"📋 Connection status: {status}")
-        
+
         # Test saving agent weights
         print("\n📦 Testing agent weights storage...")
         dummy_weights = {
-            'layer1': np.random.randn(10, 10),
-            'layer2': np.random.randn(10, 5)
+            'layer1': torch.randn(10, 10),
+            'layer2': torch.randn(10, 5),
         }
-        
+
         success = service.save_agent_weights(
             agent_id="test_agent_001",
             agent_name="SignalingModelV1",
@@ -595,16 +732,16 @@ def test_mongodb_service():
             version="v1.0",
             equity="AAPL",
             metadata={"architecture": "ResNet", "layers": 5},
-            performance_metrics={"accuracy": 0.85, "loss": 0.23}
+            performance_metrics={"accuracy": 0.85, "loss": 0.23},
         )
         print(f"  Save result: {'✅' if success else '❌'}")
-        
+
         # Test loading agent weights
         loaded = service.load_agent_weights("test_agent_001")
         if loaded:
             print(f"  ✅ Loaded agent: {loaded['agent_name']}")
             print(f"  Performance: {loaded['performance_metrics']}")
-        
+
         # Test time series data
         print("\n📈 Testing time series storage...")
         test_data = [
@@ -616,7 +753,7 @@ def test_mongodb_service():
                 high=152.80,
                 low=149.50,
                 close=151.75,
-                volume=1000000
+                volume=1000000,
             ),
             TimeSeriesData(
                 equity="AAPL",
@@ -626,34 +763,53 @@ def test_mongodb_service():
                 high=153.20,
                 low=150.90,
                 close=152.50,
-                volume=1200000
-            )
+                volume=1200000,
+            ),
         ]
-        
+
+        # Test DataFrame ingestion helper
+        print("\n🧾 Testing DataFrame ingestion (df_datastore)...")
+        df_test = pd.DataFrame(
+            {
+                'timestamp': [dp.timestamp for dp in test_data],
+                'open': [dp.open for dp in test_data],
+                'high': [dp.high for dp in test_data],
+                'low': [dp.low for dp in test_data],
+                'close': [dp.close for dp in test_data],
+                'volume': [dp.volume for dp in test_data],
+            }
+        )
+        success = service.df_datastore(df_test, "1d", "AAPL")
+        print(f"  df_datastore result: {'✅' if success else '❌'}")
+
         success = service.save_timeseries_data("AAPL", "1d", test_data)
         print(f"  Save result: {'✅' if success else '❌'}")
-        
+
         # Retrieve time series data
         retrieved = service.get_timeseries_data("AAPL", "1d", limit=5)
         print(f"  ✅ Retrieved {len(retrieved)} data points")
         if retrieved:
-            latest = retrieved[0]
+            latest = retrieved[-1]
             print(f"  Latest: {latest['timestamp']} - Close: ${latest['close']}")
-        
+
+        # Get latest price via direct DESCENDING query
+        latest_price = service.get_latest_price("AAPL", "1d")
+        print(f"  Latest price doc: {latest_price}")
+
         # Get statistics
         stats = service.get_data_statistics("AAPL", "1d")
         print(f"  📊 Stats: {stats}")
-        
+
         # List agents and equities
         agents = service.list_agents()
         print(f"\n👥 Total agents: {len(agents)}")
-        
+
         equities = service.list_equities("1d")
         print(f"📊 Equities with data: {equities}")
-        
+
         # Clean up
         service.close()
-        
+
     except Exception as e:
         print(f"❌ Test failed: {str(e)}")
 
