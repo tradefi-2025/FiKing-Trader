@@ -4,6 +4,7 @@ import logging
 import threading
 import pika
 from dotenv import load_dotenv
+import redis
 
 from .config import SignalingConfig
 from .dl import SignalingDataLoader
@@ -29,6 +30,14 @@ class SignalingWorker:
         self.rabbitmq_user = os.getenv('RABBITMQ_USER', 'guest')
         self.rabbitmq_password = os.getenv('RABBITMQ_PASSWORD', 'guest')
         
+        #redis configuration for tracking active agents (optional, can also use in-memory)
+        self.redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            decode_responses=True
+        )
+        self.redis_dict_name = "active_agents:signaling"
+
         # Queue name for training requests (specific to signaling service)
         self.training_queue_name = 'signaling_training_queue'
         self.launch_queue_name = 'signaling_launch_queue'
@@ -46,6 +55,10 @@ class SignalingWorker:
         # Agent tracking for launched agents
         self.active_agents = {}  # {agent_id: Agent instance}
         self.agents_lock = threading.Lock()
+
+        #Agent tracking for training
+        self.training_agents = {}  # {agent_id: Agent instance}
+        self.training_agents_lock = threading.Lock()
         
         # Channel reference for graceful shutdown
         self.channel = None
@@ -150,6 +163,8 @@ class SignalingWorker:
             # Store agent reference before launching (thread-safe)
             with self.agents_lock:
                 self.active_agents[agent_id] = agent
+                self.redis_client.sadd(self.redis_dict_name, agent_id)
+
             
             # Launch the agent (starts main loop and inference consumer threads)
             logger.info(f"Launching agent: {agent_id}...")
@@ -187,6 +202,7 @@ class SignalingWorker:
             with self.agents_lock:
                 if agent_id in self.active_agents:
                     del self.active_agents[agent_id]
+                    self.redis_client.srem(self.redis_dict_name, agent_id)
             return False
     
     def _send_launch_response(self, reply_to, correlation_id, agent_id, success, message):
@@ -243,7 +259,6 @@ class SignalingWorker:
             logger.info(f"Processing training request: {request_data.get('model_id')}")
             
             # Extract metadata from request
-            
             metadata_dataloader = {
                 'equity': request_data.get('entity_name'),
                 'observation_horizon': request_data.get('observation_horizon'),
@@ -322,6 +337,7 @@ class SignalingWorker:
             with self.agents_lock:
                 if agent_id in self.active_agents:
                     del self.active_agents[agent_id]
+                    self.redis_client.srem(self.redis_dict_name, agent_id)
             
             logger.info(f"✅ Successfully stopped agent: {agent_id}")
             logger.info(f"📊 Active agents: {len(self.active_agents)}")
@@ -341,6 +357,18 @@ class SignalingWorker:
         with self.agents_lock:
             return list(self.active_agents.keys())
     
+    def check_agent_status(self, agent_id):
+        """
+        Check if a specific agent is active
+        
+        Args:
+            agent_id: Agent identifier to check
+        Returns:
+            bool: True if agent is active, False otherwise
+        """
+        with self.agents_lock:
+            return agent_id in self.active_agents
+    
     def _training_thread_wrapper(self, request_data, model_id):
         """
         Wrapper to run training in a separate thread
@@ -351,6 +379,11 @@ class SignalingWorker:
         """
         try:
             logger.info(f"🧵 Thread started for training: {model_id}")
+            with self.training_agents_lock:
+                if model_id in self.training_agents:
+                    raise Exception(f"Training for {model_id} is already in progress")
+                else:
+                    self.training_agents[model_id] = None  # Placeholder to indicate training in progress
             success = self._process_training_request(request_data)
             
             if success:
@@ -361,6 +394,11 @@ class SignalingWorker:
         except Exception as e:
             logger.error(f"❌ Thread error for {model_id}: {str(e)}")
         finally:
+            # Clean up training agent tracking (thread-safe)
+            with self.training_agents_lock:
+                if model_id in self.training_agents:
+                    del self.training_agents[model_id]
+            
             # Clean up thread from active list (thread-safe)
             current_thread = threading.current_thread()
             with self.threads_lock:
@@ -556,8 +594,8 @@ class SignalingWorker:
             
             logger.info("🔄 Worker started. Waiting for training and launch requests...")
             logger.info(f"📊 Max concurrent trainings: {self.max_concurrent_trainings}")
-            logger.info(f"� Max concurrent launches: {self.max_concurrent_launches}")
-            logger.info(f"�📋 Training queue: {self.training_queue_name}")
+            logger.info(f"📊 Max concurrent launches: {self.max_concurrent_launches}")
+            logger.info(f"📋 Training queue: {self.training_queue_name}")
             logger.info(f"🚀 Launch queue: {self.launch_queue_name}")
             logger.info("Press CTRL+C to stop")
             
@@ -604,8 +642,10 @@ class SignalingWorker:
                 except Exception as e:
                     logger.error(f"❌ Error stopping agent {agent_id}: {str(e)}")
             
-            # Clear agents dictionary
+            # Clear agents dictionary and Redis
             with self.agents_lock:
+                for agent_id in self.active_agents.keys():
+                    self.redis_client.srem(self.redis_dict_name, agent_id)
                 self.active_agents.clear()
         
         # Wait for active training threads to complete (thread-safe)

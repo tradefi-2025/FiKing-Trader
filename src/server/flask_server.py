@@ -9,6 +9,8 @@ import logging
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import pika
+import redis
+
 # Load environment variables
 load_dotenv()
 
@@ -33,7 +35,18 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max request size
 
-
+# redis configuration
+try:
+    redis_client = redis.Redis(
+        host=os.getenv('REDIS_HOST', 'localhost'),
+        port=int(os.getenv('REDIS_PORT', 6379)),
+        decode_responses=True
+    )
+    redis_client.ping()  # Test connection
+    logger.info("Connected to Redis")
+except redis.ConnectionError as e:
+    logger.warning(f"Redis not available: {e}. Agent status checks will fail.")
+    redis_client = None
 # ==================== Health Check ====================
 
 @app.route('/health', methods=['GET'])
@@ -109,8 +122,8 @@ def create_model(service):
 
     
 
-@app.route('/model/<model_id>/start', methods=['POST'])
-def start_model(model_id):
+@app.route('/model/<service>/<model_id>/start', methods=['POST'])
+def start_model(service, model_id):
     """
     Start/launch a trained model for continuous prediction
     
@@ -124,8 +137,8 @@ def start_model(model_id):
     pass
 
 
-@app.route('/model/<model_id>/stop', methods=['POST'])
-def stop_model(model_id):
+@app.route('/model/<service>/<model_id>/stop', methods=['POST'])
+def stop_model(service, model_id):
     """
     Stop a running model
     
@@ -139,8 +152,8 @@ def stop_model(model_id):
     pass
 
 
-@app.route('/model/<model_id>/status', methods=['GET'])
-def get_model_status(model_id):
+@app.route('/model/<service>/<model_id>/status', methods=['GET'])
+def get_model_status(service, model_id):
     """
     Get status of a specific model
     
@@ -160,8 +173,8 @@ def get_model_status(model_id):
     pass
 
 
-@app.route('/model/<model_id>', methods=['DELETE'])
-def delete_model(model_id):
+@app.route('/model/<service>/<model_id>', methods=['DELETE'])
+def delete_model(service, model_id):
     """
     Delete a model and its associated data
     
@@ -195,8 +208,8 @@ def list_models():
 
 # ==================== Inference/Prediction ====================
 
-@app.route('/model/<model_id>/predict', methods=['POST'])
-def predict(model_id):
+@app.route('/model/<service>/<model_id>/predict', methods=['POST'])
+def predict(service, model_id):
     """
     Request on-demand prediction from a model
     
@@ -215,15 +228,15 @@ def predict(model_id):
     pass
 
 
-@app.route('/model/<model_id>/signals', methods=['GET'])
-def get_signals(model_id):
+@app.route('/model/<service>/<model_id>/signals', methods=['POST'])
+def get_signals(service, model_id):
     """
     Get recent trading signals from a model
     
     Path Parameters:
         - model_id: Unique model identifier
     
-    Query Parameters:
+    Request Body:
         - limit: (optional) Maximum number of signals
         - start_date: (optional) Filter from date
         - end_date: (optional) Filter to date
@@ -232,7 +245,80 @@ def get_signals(model_id):
         - signals: List of signal objects
         - total: Total number of signals
     """
-    pass
+    # Check Redis availability
+    if redis_client is None:
+        return jsonify({
+            'status': 'ERROR',
+            'message': 'Redis not available. Cannot check agent status.'
+        }), 503
+    
+    body = request.get_json() or {}
+    
+    if redis_client.sismember(f'active_agents:{service}', model_id):
+        connection = None
+        try:
+            # Fetch signals from agent via RabbitMQ RPC
+            queue = f'inference_queue_{model_id}'
+            connection = pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost')))
+            channel = connection.channel()
+            channel.queue_declare(queue=queue, durable=True)
+            reply_to = channel.queue_declare(queue='', exclusive=True).method.queue
+            correlation_id = str(model_id)
+            
+            channel.basic_publish(
+                exchange='',
+                routing_key=queue,
+                body=json.dumps(body),
+                properties=pika.BasicProperties(
+                    reply_to=reply_to,
+                    correlation_id=correlation_id,
+                )
+            )
+            
+            signal_response = None
+            
+            def on_response(ch, method, props, body):
+                nonlocal signal_response
+                if props.correlation_id == correlation_id:
+                    signal_response = json.loads(body)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    ch.stop_consuming()
+            
+            channel.basic_consume(
+                queue=reply_to,
+                on_message_callback=on_response
+            )
+            
+            # Add timeout to prevent infinite blocking
+            connection.call_later(30, lambda: channel.stop_consuming())  # 30 second timeout
+            channel.start_consuming()
+            
+            if signal_response is None:
+                return jsonify({
+                    'status': 'ERROR',
+                    'message': 'Timeout waiting for agent response'
+                }), 504
+            
+            return jsonify({
+                'signals': signal_response.get('signals', []),
+                'total': len(signal_response.get('signals', []))
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Error fetching signals: {str(e)}")
+            return jsonify({
+                'status': 'ERROR',
+                'message': f'Error fetching signals: {str(e)}'
+            }), 500
+        finally:
+            if connection and connection.is_open:
+                connection.close()
+    else:
+        return jsonify({
+            'status': 'ERROR',
+            'message': f'Model {model_id} is not active or does not exist.'
+        }), 404
+    
 
 
 # ==================== Data Management ====================
@@ -311,8 +397,8 @@ def get_live_price(equity):
 
 # ==================== Training ====================
 
-@app.route('/model/<model_id>/train', methods=['POST'])
-def train_model(model_id):
+@app.route('/model/<service>/<model_id>/train', methods=['POST'])
+def train_model(service, model_id):
     """
     Trigger model training
     
