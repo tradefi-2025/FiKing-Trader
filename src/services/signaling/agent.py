@@ -5,8 +5,8 @@ import logging
 import os
 import pika
 from dotenv import load_dotenv
-from ..mongoDB import MongoDBHandler
-from ..postgres import PostgresHandler
+from ...database_handlers.mongoDB import MongoDBService
+from ...database_handlers.postgres import PostgreSQLService
 from .config import SignalingConfig
 
 load_dotenv()
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class Agent:
-    def __init__(self, meta_data, model, dataloader, verification):
+    def __init__(self, meta_data=None, model=None, dataloader=None, verification=None):
         self.meta_data = meta_data
         self.model = model
         self.dl = dataloader
@@ -32,10 +32,13 @@ class Agent:
         agent_id = self.meta_data.get('agent_id', 'default')
         self.inference_queue_name = f'inference_queue_{agent_id}'
         
-        # Thread control
-        self.is_running = False
+        # Thread control (thread-safe)
+        self.stop_event = threading.Event()
+        self.stop_event.set()  # Initially stopped
         self.inference_thread = None
         self.main_loop_thread = None
+        self.mongo_service = MongoDBService()
+        self.postgres_service = PostgreSQLService()
     
     def _get_rabbitmq_connection(self):
         """Create RabbitMQ connection"""
@@ -47,61 +50,34 @@ class Agent:
         )
         return pika.BlockingConnection(parameters)
 
-    def buid_and_store(self):
-        dataloader = self.dl.fetch_training_dataloader_data()
+    def build_and_store(self):
+        dataloader,test_dataset = self.dl.fetch_dataloader()
         self.model.fit(dataloader)
         # Store the model (e.g., save to disk or database)
-        MongoDBHandler.save_model(self.model, self.meta_data)
-        PostgresHandler.update_model_metadata({'status': 'trained'}, self.meta_data['model_id'])
+        raise NotImplementedError("Model storage not implemented yet")
+        self.mongo_service.save_agent_weights(agent_id=self.meta_data['agent_id'], weights=self.model.state_dict())
+        self.postgres_service.update_model_metadata({'status': 'trained'}, self.meta_data['agent_id'])
 
     
     def launch(self):
         """Launch the agent's main loop for continuous operation in a separate thread or process.
         This function also launches the inference loop that waits for user requests and processes them."""
-        if self.is_running:
+        if not self.stop_event.is_set():
             logger.warning("Agent is already running")
             return
         
-        self.is_running = True
+        self.stop_event.clear()  # Agent is now running
         
         # Start main loop thread
-        self.main_loop_thread = threading.Thread(target=self.main_loop, daemon=True)
+        self.main_loop_thread = threading.Thread(target=self.main_loop, daemon=False)
         self.main_loop_thread.start()
         logger.info("Main loop thread started")
         
         # Start inference consumer thread
-        self.inference_thread = threading.Thread(target=self._consume_inference_queue, daemon=True)
+        self.inference_thread = threading.Thread(target=self._consume_inference_queue, daemon=False)
         self.inference_thread.start()
         logger.info("Inference consumer thread started")
 
-    def inference(self, request_data):
-        """Publish inference request to RabbitMQ queue"""
-        try:
-            connection = self._get_rabbitmq_connection()
-            channel = connection.channel()
-            
-            # Declare queue
-            channel.queue_declare(queue=self.inference_queue_name, durable=True)
-            
-            # Publish message
-            message = json.dumps(request_data)
-            channel.basic_publish(
-                exchange='',
-                routing_key=self.inference_queue_name,
-                body=message,
-                properties=pika.BasicProperties(
-                    delivery_mode=2,  # Make message persistent
-                )
-            )
-            
-            logger.info(f"Published inference request to queue: {self.inference_queue_name}")
-            connection.close()
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to publish inference request: {str(e)}")
-            return False
-    
     def _consume_inference_queue(self):
         """Wait on the RabbitMQ queue for inference requests made by the user"""
         try:
@@ -128,15 +104,56 @@ class Agent:
                     # Verify prediction
                     verification_result = self.verification.verify(result)
                     
+                    # Prepare response
+                    response = {
+                        'inference_result': result,
+                        'verification': verification_result,
+                        'agent_id': self.meta_data.get('agent_id'),
+                        'timestamp': time.time()
+                    }
+                    
                     # Log result
                     logger.info(f"Inference result: {result}")
                     logger.info(f"Verification: {verification_result}")
+                    
+                    # Send response to reply queue if specified
+                    if properties.reply_to:
+                        ch.basic_publish(
+                            exchange='',
+                            routing_key=properties.reply_to,
+                            body=json.dumps(response),
+                            properties=pika.BasicProperties(
+                                correlation_id=properties.correlation_id,
+                                delivery_mode=2
+                            )
+                        )
+                        logger.info(f"Response sent to reply queue: {properties.reply_to}")
                     
                     # Acknowledge message
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                     
                 except Exception as e:
                     logger.error(f"Error processing inference request: {str(e)}")
+                    # Send error response if reply_to is specified
+                    if properties.reply_to:
+                        error_response = {
+                            'error': str(e),
+                            'agent_id': self.meta_data.get('agent_id'),
+                            'timestamp': time.time()
+                        }
+                        try:
+                            ch.basic_publish(
+                                exchange='',
+                                routing_key=properties.reply_to,
+                                body=json.dumps(error_response),
+                                properties=pika.BasicProperties(
+                                    correlation_id=properties.correlation_id,
+                                    delivery_mode=2
+                                )
+                            )
+                        except Exception as pub_error:
+                            logger.error(f"Failed to send error response: {str(pub_error)}")
+                    
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
             
             # Set QoS
@@ -150,7 +167,7 @@ class Agent:
             
             logger.info(f"Started consuming from queue: {self.inference_queue_name}")
             
-            while self.is_running:
+            while not self.stop_event.is_set():
                 try:
                     channel.connection.process_data_events(time_limit=1)
                 except Exception as e:
@@ -168,9 +185,9 @@ class Agent:
         This loop runs indefinitely, fetching new data at the specified frequency,
         making predictions with the model, and verifying those predictions.
         """
-        freq = self.meta_data.get('frequency', self.config.default_frequency)
+        freq = self.meta_data.get('signal_frequency', self.config.default_frequency)
         
-        while self.is_running:
+        while not self.stop_event.is_set():
             try:
                 # Fetch new data for inference
                 input_data = self.dl.fetch_inference_data()
@@ -205,12 +222,12 @@ class Agent:
     def stop(self):
         """Stop the agent"""
         logger.info("Stopping agent...")
-        self.is_running = False
+        self.stop_event.set()  # Signal threads to stop
         
-        if self.main_loop_thread:
-            self.main_loop_thread.join(timeout=5)
-        if self.inference_thread:
-            self.inference_thread.join(timeout=5)
+        if self.main_loop_thread and self.main_loop_thread.is_alive():
+            self.main_loop_thread.join(timeout=10)
+        if self.inference_thread and self.inference_thread.is_alive():
+            self.inference_thread.join(timeout=10)
         
         logger.info("Agent stopped")
 
