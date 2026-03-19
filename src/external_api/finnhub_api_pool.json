@@ -1,0 +1,76 @@
+{
+  "finnhub": {
+    "d6fq0fhr01qqnmbpk1jgd6fq0fhr01qqnmbpk1k0": {
+      "last_ticker": "ZYXI",
+      "last_updated": "2026-03-04 18:09:28",
+      "total_requests": 22361,
+      "status": "active",
+      "last_saved_ticker": "ZROZ",
+      "last_saved_date": "2026-03-02"
+    },
+    "d6g1h19r01qqnmbqdnngd6g1h19r01qqnmbqdno0": {
+      "last_ticker": "ZTR",
+      "last_updated": "2026-03-04 18:09:26",
+      "total_requests": 14728,
+      "status": "active",
+      "last_saved_ticker": "YCS",
+      "last_saved_date": "2026-03-01"
+    },
+    "d6g1hdhr01qqnmbqdp1gd6g1hdhr01qqnmbqdp20": {
+      "last_ticker": "ZUMZ",
+      "last_updated": "2026-03-04 18:09:26",
+      "total_requests": 14335,
+      "status": "active",
+      "last_saved_ticker": "YELP",
+      "last_saved_date": "2026-03-02"
+    },
+    "d6g1hthr01qqnmbqdqo0d6g1hthr01qqnmbqdqog": {
+      "last_ticker": "ZUO",
+      "last_updated": "2026-03-04 18:09:27",
+      "total_requests": 14100,
+      "status": "active",
+      "last_saved_ticker": "ZCMD",
+      "last_saved_date": "2026-03-02"
+    },
+    "d6g1iapr01qqnmbqds60d6g1iapr01qqnmbqds6g": {
+      "last_ticker": "ZS",
+      "last_updated": "2026-03-04 18:09:25",
+      "total_requests": 13626,
+      "status": "active",
+      "last_saved_ticker": "ZS",
+      "last_saved_date": "2026-03-01"
+    },
+    "d255sqhr01qns40dc4pgd255sqhr01qns40dc4q0": {
+      "last_ticker": "ZTS",
+      "last_updated": "2026-03-04 18:09:26",
+      "total_requests": 13369,
+      "status": "active",
+      "last_saved_ticker": "ZTS",
+      "last_saved_date": "2026-03-01"
+    },
+    "d6g1umhr01qqnmbqff2gd6g1umhr01qqnmbqff30": {
+      "last_ticker": "ZYME",
+      "last_updated": "2026-03-04 18:09:27",
+      "total_requests": 12965,
+      "status": "active",
+      "last_saved_ticker": "ZYME",
+      "last_saved_date": "2026-03-02"
+    },
+    "d6g1v1pr01qqnmbqfg90d6g1v1pr01qqnmbqfg9g": {
+      "last_ticker": "ZTO",
+      "last_updated": "2026-03-04 18:09:25",
+      "total_requests": 12863,
+      "status": "active",
+      "last_saved_ticker": "ZION",
+      "last_saved_date": "2026-03-02"
+    },
+    "d6flpuhr01qqnmbp5v70d6flpuhr01qqnmbp5v7g": {
+      "last_ticker": "ZOM",
+      "last_updated": "2026-03-04 18:09:24",
+      "total_requests": 12614,
+      "status": "active",
+      "last_saved_ticker": "YUMC",
+      "last_saved_date": "2026-03-03"
+    }
+  }
+}
