@@ -710,10 +710,9 @@ def get_all_ts_stats(service: MongoDBService, equities: List[str], frequencies: 
             print(f"Stats for {equity} at {freq}: {stats[equity][freq]}")
     return stats
 if __name__ == "__main__":
-    # update_timeseries_dataset()
-    import json
-    service = MongoDBService()
-    equities = json.load(open("configs/entities.json", "r"))
-    frequencies = MongoDBService.SUPPORTED_FREQUENCIES
-    stats = get_all_ts_stats(service, list(equities.keys())[:200], frequencies)
-    json.dump(stats, open("timeseries_stats.json", "w"), indent=4, default=str)
+    update_timeseries_dataset()
+    # equities = json.load(open("configs/entities.json", "r"))
+    # frequencies = MongoDBService.SUPPORTED_FREQUENCIES
+    # stats = get_all_ts_stats(service, list(equities.keys())[:200], frequencies)
+    # json.dump(stats, open("timeseries_stats.json", "w"), indent=4, default=str)
+    
