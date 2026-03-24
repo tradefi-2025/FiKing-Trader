@@ -1,11 +1,11 @@
 # Pipeline Checkpoints (Priority Order)
 
 ## P0: Core flow unblocks
-- Fix dataloader constructor mismatch and add `fetch_inference_data()` in `src/services/signaling/dl.py` so inference can run.
+
 - Complete `Agent.build_and_store()` in `src/services/signaling/agent.py`: train, save weights to Mongo, write metadata to Postgres.
 - Align weight API names: use `get_agent_weights()` (or rename consistently) in `src/database_handlers/mongoDB.py` and `src/services/signaling/worker.py`.
 - Ensure model input shape matches dataloader output (add projection or reshape in `src/services/signaling/dl.py` or update model in `src/services/signaling/model.py`).
-
+- Complete the contextualizer file
 ## P1: Training + launch lifecycle
 - Implement Postgres metadata helpers (`create/update/get model`) in `src/database_handlers/postgres.py`.
 - Wire worker launch path to read metadata, load weights, and start agent in `src/services/signaling/worker.py`.

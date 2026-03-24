@@ -5,7 +5,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from .config import SignalingConfig
 from ...database_handlers.mongoDB import MongoDBService
 from ...external_apis.live import RefinityService
-
+from ...external_apis.news import FinnhubNewsCollector
+from ...encoders.contextualizer import Contextualizer
 
 def fetch_news_embeddings(equity: str,prompt: str, From,To) -> torch.Tensor:
     '''
@@ -58,8 +59,12 @@ class SignalingDataLoader:
         self.db = MongoDBService()
         self.rd = RefinityService()
 
-
+        self.finnhub_collector = FinnhubNewsCollector()
         
+        self.contextualizer = Contextualizer(self.config)
+
+
+
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
@@ -318,8 +323,18 @@ class SignalingDataLoader:
             end=time_now,
             frequency=self.frequency,
         )
-        
-        return last_window.unsqueeze(0)  # (1, window_size, 5)
+        news = self.finnhub_collector.collect(
+            entities=[self.equity],
+            start_date=start_time.strftime("%Y-%m-%d"),
+            end_date=time_now.strftime("%Y-%m-%d"),
+            fields=["Date", "Article"]
+        )
+
+        list_articles = [r["Article"] for r in news]
+        ts= torch.FloatTensor(pd[['open', 'high', 'low', 'close', 'volume']].values.astype("float32"))
+        timestamps = pd['timestamp'].tolist()
+        representation = self.contextualizer.contextualize(self.equity, timestamps, ts, list_articles)
+        return representation  # (1, window_size, 5)
 
 
 if __name__ == "__main__":
