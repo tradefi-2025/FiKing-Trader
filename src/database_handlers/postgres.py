@@ -24,10 +24,10 @@ import psycopg2
 from psycopg2 import pool, sql, extras
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from contextlib import contextmanager
-from dotenv import load_dotenv
+from src.utils.env import load_env
 
 # Load environment variables
-load_dotenv()
+load_env()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

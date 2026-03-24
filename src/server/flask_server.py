@@ -7,12 +7,12 @@ import os
 import json
 import logging
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
+from src.utils.env import load_env
 import pika
 import redis
 
 # Load environment variables
-load_dotenv()
+load_env()
 
 def verify(body, service):
     """

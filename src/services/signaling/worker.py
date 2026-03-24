@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import pika
-from dotenv import load_dotenv
+from src.utils.env import load_env
 import redis
 
 from .config import SignalingConfig
@@ -13,7 +13,7 @@ from .verification import SignalingVerification
 from .agent import Agent
 from ...database_handlers.mongoDB import MongoDBService
 
-load_dotenv()
+load_env()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

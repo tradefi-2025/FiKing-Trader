@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 import pandas as pd
-from dotenv import load_dotenv
+from src.utils.env import load_env
 
 try:
     import refinitiv.data as rd
@@ -18,10 +18,7 @@ except ImportError:  # pragma: no cover - library not installed
 # Environment & Logging
 # -----------------------------------------------------------------------------
 
-# Let the application control where .env lives; fall back to project root if present.
-DEFAULT_ENV = Path(__file__).resolve().parents[2] / ".env"
-if DEFAULT_ENV.exists():
-    load_dotenv(DEFAULT_ENV)
+load_env()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -345,8 +342,8 @@ class RefinitivService:
 if __name__ == "__main__":
     # Example usage
     with RefinitivService() as service:
-        # df = service.get_past_year_ohlc("AAPL")
-        # if df is not None:
-        #     print(df.head())
+        df = service.get_past_year_ohlc("AAPL")
+        if df is not None:
+            print(df.head())
         # data=service.get_dataset_all_equities()
-        service.download_and_store_all_equities()
+        # service.download_and_store_all_equities()

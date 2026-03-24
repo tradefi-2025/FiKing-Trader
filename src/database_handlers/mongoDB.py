@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import torch
-from dotenv import load_dotenv
+from src.utils.env import load_env
 from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
 from pymongo.collection import Collection
 from pymongo.errors import BulkWriteError, ConnectionFailure
@@ -16,7 +16,7 @@ from pymongo.errors import BulkWriteError, ConnectionFailure
 # Environment & Logging
 # -----------------------------------------------------------------------------
 
-load_dotenv()
+load_env()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -710,9 +710,9 @@ def get_all_ts_stats(service: MongoDBService, equities: List[str], frequencies: 
             print(f"Stats for {equity} at {freq}: {stats[equity][freq]}")
     return stats
 if __name__ == "__main__":
-    update_timeseries_dataset()
+    # update_timeseries_dataset()
     # equities = json.load(open("configs/entities.json", "r"))
     # frequencies = MongoDBService.SUPPORTED_FREQUENCIES
     # stats = get_all_ts_stats(service, list(equities.keys())[:200], frequencies)
     # json.dump(stats, open("timeseries_stats.json", "w"), indent=4, default=str)
-    
+    print(get_all_ts_stats(MongoDBService(), ["aaxj", "MSFT"], ["1min","1d", "1h"]))

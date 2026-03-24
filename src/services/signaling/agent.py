@@ -4,12 +4,12 @@ import threading
 import logging
 import os
 import pika
-from dotenv import load_dotenv
+from src.utils.env import load_env
 from ...database_handlers.mongoDB import MongoDBService
 from ...database_handlers.postgres import PostgreSQLService
 from .config import SignalingConfig
 
-load_dotenv()
+load_env()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,6 @@ class Agent:
         self.rabbitmq_password = os.getenv('RABBITMQ_PASSWORD', 'guest')
         
         # Queue names
-        agent_id = self.meta_data.get('agent_id', 'default')
         self.inference_queue_name = f'inference_queue_{agent_id}'
         
         # Thread control (thread-safe)

@@ -4,6 +4,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from .config import SignalingConfig
 from ...database_handlers.mongoDB import MongoDBService
+from ...external_apis.live import RefinityService
+
 
 def fetch_news_embeddings(equity: str,prompt: str, From,To) -> torch.Tensor:
     '''
@@ -54,6 +56,8 @@ class SignalingDataLoader:
         self.news_resources: list        = metadata.get("news_resources", [])
 
         self.db = MongoDBService()
+        self.rd = RefinityService()
+
 
         
     # ------------------------------------------------------------------
@@ -306,16 +310,15 @@ class SignalingDataLoader:
         Returns:
             torch.Tensor  shape (1, window_size, 5)
         """
-        norm_df = self._normalize(self._fetch_df())
-
-        if len(norm_df) < self.window_size:
-            raise ValueError(
-                f"Need at least {self.window_size} candles, got {len(norm_df)}."
-            )
-
-        last_window = torch.tensor(
-            norm_df.values[-self.window_size:].astype("float32")
-        )                            # (window_size, 5)
+        time_now = pd.Timestamp.now()
+        start_time = time_now - self.frequency_to_timedelta[self.frequency] * self.window_size
+        recoords= self.rd.get_ohlc_df(
+            equity=self.equity,
+            start=start_time,
+            end=time_now,
+            frequency=self.frequency,
+        )
+        
         return last_window.unsqueeze(0)  # (1, window_size, 5)
 
 
