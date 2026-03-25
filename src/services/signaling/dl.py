@@ -1,12 +1,19 @@
+import os
+import json
+import time
+import uuid
+import logging
 import pandas as pd
 import torch
+import pika
 from torch.utils.data import DataLoader, TensorDataset
 
 from .config import SignalingConfig
 from ...database_handlers.mongoDB import MongoDBService
 from ...external_apis.live import RefinityService
 from ...external_apis.news import FinnhubNewsCollector
-from ...encoders.contextualizer import Contextualizer
+
+logger = logging.getLogger(__name__)
 
 def fetch_news_embeddings(equity: str,prompt: str, From,To) -> torch.Tensor:
     '''
@@ -60,8 +67,16 @@ class SignalingDataLoader:
         self.rd = RefinityService()
 
         self.finnhub_collector = FinnhubNewsCollector()
-        
-        self.contextualizer = Contextualizer(self.config)
+
+        self.rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
+        self.rabbitmq_port = int(os.getenv("RABBITMQ_PORT", 5672))
+        self.rabbitmq_user = os.getenv("RABBITMQ_USER", "guest")
+        self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
+        self.contextualizer_queue = os.getenv(
+            "CONTEXTUALIZER_QUEUE", "contextualization_requests"
+        )
+        self._ctx_connection = None
+        self._ctx_channel = None
 
 
 
@@ -178,6 +193,67 @@ class SignalingDataLoader:
         end_timestamps = norm_df.index[end_indices.tolist()].tolist()  # timestamps corresponding to each Y
         return X, Y, end_timestamps   # M = N - window_size
 
+    def _ensure_contextualizer_channel(self) -> None:
+        if self._ctx_connection and self._ctx_connection.is_open:
+            if self._ctx_channel and self._ctx_channel.is_open:
+                return
+        credentials = pika.PlainCredentials(self.rabbitmq_user, self.rabbitmq_password)
+        params = pika.ConnectionParameters(
+            host=self.rabbitmq_host,
+            port=self.rabbitmq_port,
+            credentials=credentials,
+            heartbeat=60,
+            blocked_connection_timeout=30,
+        )
+        self._ctx_connection = pika.BlockingConnection(params)
+        self._ctx_channel = self._ctx_connection.channel()
+        self._ctx_channel.queue_declare(queue=self.contextualizer_queue)
+
+    def _request_contextualizer(self, equity, timestamps, ts, text) -> torch.Tensor:
+        self._ensure_contextualizer_channel()
+        channel = self._ctx_channel
+        callback_queue = channel.queue_declare(queue="", exclusive=True).method.queue
+        correlation_id = str(uuid.uuid4())
+        request = {
+            "equity": equity,
+            "timestamps": timestamps,
+            "ts": ts.tolist(),
+            "text": text,
+        }
+
+        response = {"body": None}
+
+        def on_response(ch, method, props, body):
+            if props.correlation_id == correlation_id:
+                response["body"] = body
+
+        consumer_tag = channel.basic_consume(
+            queue=callback_queue,
+            on_message_callback=on_response,
+            auto_ack=True,
+        )
+
+        channel.basic_publish(
+            exchange="",
+            routing_key=self.contextualizer_queue,
+            body=json.dumps(request),
+            properties=pika.BasicProperties(
+                reply_to=callback_queue,
+                correlation_id=correlation_id,
+            ),
+        )
+
+        deadline = time.monotonic() + 10.0
+        while response["body"] is None:
+            self._ctx_connection.process_data_events(time_limit=1)
+            if time.monotonic() >= deadline:
+                channel.basic_cancel(consumer_tag)
+                raise TimeoutError("Contextualizer request timed out")
+
+        channel.basic_cancel(consumer_tag)
+        payload = json.loads(response["body"])
+        return torch.tensor(payload, dtype=torch.float32)
+
     # ------------------------------------------------------------------
     # Public — called by the worker
     # ------------------------------------------------------------------
@@ -248,7 +324,7 @@ class SignalingDataLoader:
             print(f"Window ending at {end_ts} has {window_embs.shape[0]} news embeddings.")
         print("Align news to windows test passed!")
 
-    def fetch_dataloader(self, large_model, train_ratio: float = 0.8):
+    def fetch_dataloader(self, train_ratio: float = 0.8):
         """
         Full pipeline:
             MongoDB → normalize → OHLCV windows
@@ -283,9 +359,12 @@ class SignalingDataLoader:
 
         # Step 3: pass (OHLCV, news) pairs through the large model
         # The large model fuses both modalities and produces representation vectors
-        with torch.no_grad():
-            representations = large_model.encode(X_ohlcv, X_news)
+        
+
+        
         # representations : (M, d_model=256)
+        #TODO : implement the large model encoding logic here. For now we will use random tensors to simulate the output.
+
 
         # Step 4: shuffle before split
         perm = torch.randperm(len(representations))
@@ -317,7 +396,7 @@ class SignalingDataLoader:
         """
         time_now = pd.Timestamp.now()
         start_time = time_now - self.frequency_to_timedelta[self.frequency] * self.window_size
-        recoords= self.rd.get_ohlc_df(
+        ts= self.rd.get_ohlc_tensor(
             equity=self.equity,
             start=start_time,
             end=time_now,
@@ -331,10 +410,18 @@ class SignalingDataLoader:
         )
 
         list_articles = [r["Article"] for r in news]
-        ts= torch.FloatTensor(pd[['open', 'high', 'low', 'close', 'volume']].values.astype("float32"))
-        timestamps = pd['timestamp'].tolist()
-        representation = self.contextualizer.contextualize(self.equity, timestamps, ts, list_articles)
-        return representation  # (1, window_size, 5)
+        if not list_articles:
+            list_articles = [""]
+        timestamps = recoords['timestamp'].tolist()
+        ts_window = ts.unsqueeze(0)
+        representation = self._request_contextualizer(
+            self.equity,
+            timestamps,
+            ts_window,
+            [list_articles],
+        )
+
+        return representation
 
 
 if __name__ == "__main__":

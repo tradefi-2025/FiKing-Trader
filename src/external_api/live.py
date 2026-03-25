@@ -8,7 +8,7 @@ from typing import Iterable, List, Optional
 
 import pandas as pd
 from src.utils.env import load_env
-
+import torch
 try:
     import refinitiv.data as rd
 except ImportError:  # pragma: no cover - library not installed
@@ -206,6 +206,27 @@ class RefinitivService:
                 raise
             return None
 
+    def get_ohlc_tensor(
+        self,
+        equity_ric: str,
+        start: datetime,
+        end: datetime,
+        *,
+        interval: str = "1d",
+    ) -> Optional[torch.FloatTensor]:
+        """
+        Fetch OHLCV and return as a FloatTensor of shape [T, 5].
+
+        Columns are [open, high, low, close, volume] in that order.
+
+        Returns None on error / no data.
+        """
+        for ext in [".O", ".N"]:
+            ric = equity_ric + ext
+            df = self.get_ohlc_df(ric, start, end, interval=interval)
+            if df is not None and not df.empty:
+                return torch.FloatTensor(df[["open", "high", "low", "close", "volume"]].values.astype("float32"))
+        return None
     # -------------------------------------------------------------------------
     # Higher-level helpers
     # -------------------------------------------------------------------------

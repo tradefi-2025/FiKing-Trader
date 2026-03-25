@@ -72,3 +72,5 @@ data/
 *.pt
 *.pth
 models/weights/
+
+Kronos

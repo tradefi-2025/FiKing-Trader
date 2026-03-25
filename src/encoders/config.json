@@ -1,0 +1,10 @@
+{
+    "ts_encoder": {
+        "name": "kronos-small",
+        "output_dim": 512
+    },
+    "text_encoder": {
+        "name": "flang-small",
+        "output_dim": 768
+    }
+}
