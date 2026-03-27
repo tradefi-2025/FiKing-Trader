@@ -148,3 +148,11 @@ def test_fetch_inference_data_raises_on_short_series():
         assert False, "Expected ValueError for short series"
     except ValueError:
         assert True
+
+if __name__ == "__main__":
+    test_normalize_values()
+    test_build_sequences_shapes()
+    test_align_news_to_windows_empty()
+    test_fetch_inference_data_shape()
+    test_fetch_inference_data_raises_on_short_series()
+    print("All tests passed!")

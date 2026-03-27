@@ -50,10 +50,15 @@ def test_agent_launch_and_stop(monkeypatch):
 
     agent.launch()
     time.sleep(0.05)
-
+    print("Flags after launch:", flags)
     assert not agent.stop_event.is_set()
     assert flags["main"] is True
     assert flags["queue"] is True
 
     agent.stop()
     assert agent.stop_event.is_set()
+
+
+if __name__ == "__main__":
+    test_agent_launch_and_stop()
+    print("Test passed!")

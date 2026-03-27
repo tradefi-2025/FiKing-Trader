@@ -680,8 +680,9 @@ def update_timeseries_dataset():
     equities = json.load(open("configs/entities.json", "r"))
     metaData = json.load(open("docs/ts_dataset/metaData.json", "r"))
 
-    for equity in equities:
-        for frequency in MongoDBService.SUPPORTED_FREQUENCIES:
+    for frequency in MongoDBService.SUPPORTED_FREQUENCIES:
+        for equity in equities:
+       
             if metaData.get(equity,{}).get(frequency):
                 logger.info(f"Dataset for {equity} at {frequency} is up to date. Skipping...")
                 continue
@@ -692,15 +693,33 @@ def update_timeseries_dataset():
                 if df is not None and not df.empty:
                     service.push_timeseries_df(equity, frequency, df)
                     logger.info(f"✅ Updated dataset for {equity} at {frequency}")
-                    metaData[equity][frequency] = True
+                    
                 else:
                     logger.warning(f"⚠️ No data to update for {equity} at {frequency}")
+
+                metaData[equity][frequency] = True
             except Exception as exc:
                 logger.error(f"❌ Error updating dataset for {equity} at {frequency}: {exc}")
         
     with open("docs/ts_dataset/metaData.json", "w") as f:
         json.dump(metaData, f, indent=4)
 
+def update_listed_equities(equities,service, frequency: str = "1d") -> None:
+    from src.external_api.live import RefinitivService
+
+    rd= RefinitivService()
+    for equity in equities:
+        try:
+            ts=rd.get_ohlc_df_for_mongo(equity, interval=frequency)
+            if ts is not None and not ts.empty:
+                service.push_timeseries_df(equity, frequency, ts)
+                logger.info(f"✅ Updated dataset for {equity} at {frequency}")
+            else:
+                logger.warning(f"⚠️ No data to update for {equity} at {frequency}")
+
+        except Exception as exc:
+            logger.error(f"❌ Error updating dataset for {equity} at {frequency}: {exc}")
+    
 def get_all_ts_stats(service: MongoDBService, equities: List[str], frequencies: List[str]) -> Dict[str, Any]:
     stats = {}
     for equity in equities:
@@ -715,4 +734,7 @@ if __name__ == "__main__":
     # frequencies = MongoDBService.SUPPORTED_FREQUENCIES
     # stats = get_all_ts_stats(service, list(equities.keys())[:200], frequencies)
     # json.dump(stats, open("timeseries_stats.json", "w"), indent=4, default=str)
-    print(get_all_ts_stats(MongoDBService(), ["aaxj", "MSFT"], ["1min","1d", "1h"]))
+
+    srvice = MongoDBService()
+    update_listed_equities(["AAPL", "MSFT"], srvice, frequency="1min")
+    print(get_all_ts_stats(MongoDBService(), ["aapl", "MSFT"], ["1min","1d", "1h"]))

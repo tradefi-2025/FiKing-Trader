@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from .config import SignalingConfig
 from ...database_handlers.mongoDB import MongoDBService
-from ...external_apis.live import RefinityService
-from ...external_apis.news import FinnhubNewsCollector
+from ...external_api.live import RefinitivService
+from ...external_api.news import FinnhubNewsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class SignalingDataLoader:
         self.news_resources: list        = metadata.get("news_resources", [])
 
         self.db = MongoDBService()
-        self.rd = RefinityService()
+        self.rd = RefinitivService()
 
         self.finnhub_collector = FinnhubNewsCollector()
 

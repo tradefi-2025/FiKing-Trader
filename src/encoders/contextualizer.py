@@ -141,4 +141,5 @@ def test():
     print("TS Embeddings shape:", rep.shape)  # (2, window_size
 
 if __name__ == "__main__":
-    test()
+    l=launcher()
+    l.start()
