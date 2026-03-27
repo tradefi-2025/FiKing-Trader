@@ -134,7 +134,38 @@ def start_model(service, model_id):
         - status: SUCCESS or FAILURE
         - message: Result description
     """
-    pass
+    # Check Redis availability
+    if redis_client is None:
+        return jsonify({
+            'status': 'ERROR',
+            'message': 'Redis not available. Cannot check agent status.'
+        }), 503
+    
+    body = request.get_json() or {}
+    # Check if model is already active
+    if redis_client.sismember(f'active_agents:{service}', model_id):
+        return jsonify({
+            'status': 'ERROR',
+            'message': f'Model {model_id} is already active.'
+        }), 400
+    
+    queue = f'{service}_launch_queue'
+    connection = pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost')))
+    channel = connection.channel()
+    channel.queue_declare(queue=queue, durable=True)
+    
+    channel.basic_publish(
+        exchange='',
+        routing_key=queue,
+        body=json.dumps(body),
+        properties=pika.BasicProperties()
+    )
+
+    return jsonify({
+        'status': 'SUCCESS',
+        'message': f'Model {model_id} launch request accepted and queued for processing.'
+    }), 200
+
 
 
 @app.route('/model/<service>/<model_id>/stop', methods=['POST'])
@@ -208,7 +239,7 @@ def list_models():
 
 # ==================== Inference/Prediction ====================
 
-@app.route('/model/<service>/<model_id>/predict', methods=['POST'])
+@app.route('/model/<service>/predict', methods=['POST'])
 def predict(service, model_id):
     """
     Request on-demand prediction from a model
@@ -225,6 +256,8 @@ def predict(service, model_id):
         - confidence: Prediction confidence
         - timestamp: Prediction timestamp
     """
+    
+            
     pass
 
 

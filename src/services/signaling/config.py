@@ -15,3 +15,4 @@ class SignalingConfig:
     epoch: int = 100  # number of training epochs
     default_frequency: int = 60  # seconds
     default_confidence_level: float = 0.95
+    step_size: int = 10  # epochs between learning rate decay
