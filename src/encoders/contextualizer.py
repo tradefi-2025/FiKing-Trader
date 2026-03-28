@@ -1,3 +1,5 @@
+import os
+
 from src.encoders.text_handler import FlangService
 from src.encoders.ts_handler import KronosService
 import torch
@@ -18,11 +20,18 @@ class NaiveContextualizer:
 
 
     def contextualize(self, equity, timestamps,ts,text):
-        ts_embeddings = self.kronos_service.encode_timeseries_batch(ts)
-        text_embeddings = torch.stack([self.flang_service.encode(t, pooling="cls").mean(dim=0) for t in text])
+        if ts is not None and len(ts) and text is not None and len(text):
+            ts_embeddings = self.kronos_service.encode_timeseries_batch(ts)
+            text_embeddings = torch.stack([self.flang_service.encode(t, pooling="cls").mean(dim=0) for t in text])
 
-        return torch.cat([ts_embeddings, text_embeddings], dim=1)
-    
+            return torch.cat([ts_embeddings, text_embeddings], dim=1)
+        elif ts is not None and len(ts) and not (text is not None and len(text)):
+            return self.kronos_service.encode_timeseries_batch(ts)
+        
+        elif not (ts is not None and len(ts)) and text is not None and len(text):
+            return torch.stack([self.flang_service.encode(t, pooling="cls").mean(dim=0) for t in text])
+        else:
+            return torch.zeros((1, self.d_model * 2))  # Return a zero vector if no data is available
 
 
 logger = logging.getLogger(__name__)
@@ -42,15 +51,16 @@ class launcher:
             retry_delay=2,
             socket_timeout=30,
         )
+        self.queue_name = os.getenv("CONTEXTUALIZER_QUEUE", "contextualization_requests")
         self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
-        self.channel.queue_declare(queue="contextualization_requests")
+        self.channel.queue_declare(queue=self.queue_name)
         self.channel.basic_qos(prefetch_count=1)
 
     def start(self):
         print("Contextualizer service started. Waiting for requests...")
         self.channel.basic_consume(
-            queue="contextualization_requests",
+            queue=self.queue_name,
             on_message_callback=self.on_request,
             auto_ack=False,
         )
@@ -70,11 +80,14 @@ class launcher:
             request = json.loads(body)
             equity = request["equity"]
             timestamps = request["timestamps"]
-            ts = torch.as_tensor(request["ts"], dtype=torch.float32)
-            text = request["text"]
+            ts=request.get("ts", [])
+            if ts:
+                ts = torch.as_tensor(ts, dtype=torch.float32)
+            
+            text = request.get("text", [])
 
             print(
-                f"Received request for {equity} with {len(timestamps)} timestamps and {len(text)} articles."
+                f"Received request for {equity} with {len(timestamps)} timestamps and {len(text) if text is not None else 0} articles."
             )
             with torch.inference_mode():
                 representation = self._contextualize(equity, timestamps, ts, text)

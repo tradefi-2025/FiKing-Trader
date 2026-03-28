@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import json
 import time
@@ -7,7 +8,7 @@ import pandas as pd
 import torch
 import pika
 from torch.utils.data import DataLoader, TensorDataset
-
+import numpy as np
 from .config import SignalingConfig
 from ...database_handlers.mongoDB import MongoDBService
 from ...external_api.live import RefinitivService
@@ -100,6 +101,9 @@ class SignalingDataLoader:
             frequency=self.frequency,
         )
         if not records:
+            records=self.rd.get_ohlc_df_for_mongo(self.equity, self.frequency)
+        
+        if not records:
             raise ValueError(f"No OHLCV records found for {self.equity} at {self.frequency}")
 
         df = pd.DataFrame(records)[["timestamp", "open", "high", "low", "close", "volume"]]
@@ -107,20 +111,28 @@ class SignalingDataLoader:
             df[col] = df[col].astype(float)
         return df.set_index("timestamp").sort_index()
 
+   
     def _normalize(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Convert raw OHLCV into scale-free percentage changes.
+        Convert raw OHLCV into scale-free log returns.
 
-        - open, high, low, close: % change vs previous close.
-        - volume: % change vs previous volume.
+        - open, high, low, close: log return vs previous close.
+        - volume: log return vs previous volume.
         """
         df = df.copy()
         norm = pd.DataFrame(index=df.index)
-        norm["open"] = df["open"] / df["close"].shift(1) - 1
-        norm["high"] = df["high"] / df["close"].shift(1) - 1
-        norm["low"] = df["low"] / df["close"].shift(1) - 1
-        norm["close"] = df["close"] / df["close"].shift(1) - 1
-        norm["volume"] = df["volume"].pct_change()
+
+        # price log-returns: ln(price_t / close_{t-1})
+        prev_close = df["close"].shift(1)
+        norm["open"] = np.log(df["open"] / prev_close)
+        norm["high"] = np.log(df["high"] / prev_close)
+        norm["low"] = np.log(df["low"] / prev_close)
+        norm["close"] = np.log(df["close"] / prev_close)
+
+        # volume log-returns (use log1p on pct to be numerically safer)
+        vol_ret = df["volume"].pct_change()
+        norm["volume"] = np.log1p(vol_ret)  # ≈ log(volume_t / volume_{t-1})[web:46][web:48]
+
         return norm.dropna().astype("float32")
 
     def _build_sequences(self, norm_df: pd.DataFrame):
@@ -135,28 +147,37 @@ class SignalingDataLoader:
         step = self.config.step_size
 
         values = torch.tensor(norm_df.values, dtype=torch.float32)
+        
         close_col = torch.tensor(norm_df["close"].values, dtype=torch.float32)
 
         # Need space to look prediction_horizon steps ahead
         values = values[:-prediction_horizon]
+        values = (values[1:]/(values[:-1]+1e-8)).log()  # log returns between consecutive candles
         close_col = close_col[:-prediction_horizon]
 
         # Build X with unfold over time dimension
         X = values.unfold(0, self.window_size, step)  # (M_raw, 5, window_size)
+        
         X = X.permute(0, 2, 1)                        # (M_raw, window_size, 5)
-
+        # Build Y as the future return from last candle in window to prediction horizon
+        end_indices = torch.arange(self.window_size - 1, len(values)-prediction_horizon, step)  # indices of last candle in each window
+        pred_horizons = end_indices+prediction_horizon  # indices of the candle we want to predict
+        Y = (close_col[pred_horizons]/close_col[end_indices]).log().unsqueeze(-1)  # log return from last candle in window to prediction horizon candle
+        end_timestamps = norm_df.index[end_indices.tolist()].tolist()
+        return X, Y, end_timestamps
     def _ensure_contextualizer_channel(self) -> None:
         if self._ctx_connection and self._ctx_connection.is_open:
             if self._ctx_channel and self._ctx_channel.is_open:
                 return
-        credentials = pika.PlainCredentials(self.rabbitmq_user, self.rabbitmq_password)
         params = pika.ConnectionParameters(
-            host=self.rabbitmq_host,
-            port=self.rabbitmq_port,
-            credentials=credentials,
+            host="localhost",
             heartbeat=60,
             blocked_connection_timeout=30,
+            connection_attempts=3,
+            retry_delay=2,
+            socket_timeout=30,
         )
+        
         self._ctx_connection = pika.BlockingConnection(params)
         self._ctx_channel = self._ctx_connection.channel()
         self._ctx_channel.queue_declare(queue=self.contextualizer_queue)
@@ -168,7 +189,7 @@ class SignalingDataLoader:
         correlation_id = str(uuid.uuid4())
         request = {
             "equity": equity,
-            "timestamps": timestamps,
+            "timestamps": [str(t) for t in timestamps],
             "ts": ts.tolist(),
             "text": text,
         }
@@ -328,31 +349,38 @@ class SignalingDataLoader:
         """
         # Step 1: OHLCV → normalize → sliding windows
         raw_df = self._fetch_df()
-        norm_df = self._normalize(raw_df)
-        X_ohlcv, Y, end_timestamps = self._build_sequences(norm_df)
+        # norm_df = self._normalize(raw_df)
+        X_ohlcv, Y, end_timestamps = self._build_sequences(raw_df)
+        
         # X_ohlcv: (M, window_size, 5), Y: (M, 1)
 
         # Step 2: fetch and align news embeddings
         X_news_list = self._align_news_to_windows(end_timestamps)
         X_news = self._pad_news_windows(X_news_list)
+        
         # X_news: (M, max_news_per_window, embedding_dim)
 
         # Step 3: pass (OHLCV, news) pairs through the large model
         # The large model fuses both modalities and produces representation vectors
         
 
-        
         # representations : (M, d_model=256)
-        #TODO : implement the large model encoding logic here. For now we will use random tensors to simulate the output.
+        ts_representations = self._request_contextualizer(
+            self.equity,
+            end_timestamps,
+            X_ohlcv,
+            None,
+        )
+        
 
-
+        representations = torch.cat([ts_representations, X_news.mean(dim=1)], dim=1)
         # Step 4: shuffle before splitting
         perm = torch.randperm(len(representations))
         representations = representations[perm]
         Y = Y[perm]
 
         split = int(len(representations) * train_ratio)
-
+        print(f"Total samples: {len(representations)}, Train: {split}, Test: {len(representations) - split}")
         train_loader = DataLoader(
             TensorDataset(representations[:split], Y[:split]),
             batch_size=self.config.batch_size,
@@ -375,96 +403,68 @@ class SignalingDataLoader:
         Returns:
             torch.Tensor of shape (1, window_size, 5)
         """
-        time_now = pd.Timestamp.now()
-        start_time = time_now - self.frequency_to_timedelta[self.frequency] * self.window_size
-        ts= self.rd.get_ohlc_tensor(
-            equity=self.equity,
-            start=start_time,
-            end=time_now,
-            frequency=self.frequency,
-        )
-        news = self.finnhub_collector.collect(
-            entities=[self.equity],
-            start_date=start_time.strftime("%Y-%m-%d"),
-            end_date=time_now.strftime("%Y-%m-%d"),
-            fields=["Date", "Article"]
-        )
+        try:
+            time_now = pd.Timestamp.now()-pd.Timedelta(days=3)  # buffer to ensure we get the latest closed candle
+            start_time = time_now - self.frequency_to_timedelta[self.frequency] * self.window_size
+            ts= self.rd.get_ohlc_tensor(
+                equity_ric=self.equity,
+                start=start_time,
+                end=time_now,
+                interval=self.frequency,
+            )
+            news = self.finnhub_collector.collect(
+                entities=[self.equity],
+                start_date=start_time.strftime("%Y-%m-%d"),
+                end_date=time_now.strftime("%Y-%m-%d"),
+                fields=["Date", "Article"]
+            )
 
-        list_articles = [r["Article"] for r in news]
-        if not list_articles:
-            list_articles = [""]
-        timestamps = recoords['timestamp'].tolist()
-        ts_window = ts.unsqueeze(0)
-        representation = self._request_contextualizer(
-            self.equity,
-            timestamps,
-            ts_window,
-            [list_articles],
-        )
+            list_articles = [r["Article"] for r in news]
+            if not list_articles:
+                list_articles = [""]
+            
+            timestamps =  [n['Date'] for n in news]
+            ts_window = ts.unsqueeze(0)
+            representation = self._request_contextualizer(
+                self.equity,
+                timestamps,
+                ts_window,
+                [list_articles],
+            )
 
-        return representation
+            return representation
+        except Exception:
+            logger.exception("Failed to fetch inference data")
+            return None  # Return a zero vector on failure
 
 
-# ----------------------------------------------------------------------
-# External test helper
-# ----------------------------------------------------------------------
-
-def test_signaling_dataloader() -> None:
-    """
-    End-to-end smoke test for SignalingDataLoader.
-
-    - Instantiates the loader with sample metadata.
-    - Builds the full train loader / test dataset using a dummy large_model.
-    - Runs a single inference fetch.
-    """
-
-    class DummyLargeModel:
-        def __init__(self, d_model: int = 256):
-            self.d_model = d_model
-
-        def encode(self, X_ohlcv: torch.Tensor, X_news: torch.Tensor) -> torch.Tensor:
-            """
-            Simple dummy encoder:
-
-            - X_ohlcv: (M, window_size, 5)
-            - X_news:  (M, max_news, emb_dim)
-            Returns:
-                (M, d_model) tensor.
-            """
-            # Flatten and concatenate basic statistics as a toy representation
-            M = X_ohlcv.size(0)
-            # Example: just take means along time/news dims and project
-            ohlcv_feat = X_ohlcv.mean(dim=1)            # (M, 5)
-            news_feat = X_news.mean(dim=1)             # (M, emb_dim)
-            feat = torch.cat([ohlcv_feat, news_feat], dim=1)  # (M, 5 + emb_dim)
-
-            # Project to d_model with a random linear map (fixed shape)
-            in_dim = feat.size(1)
-            W = torch.randn(in_dim, self.d_model, dtype=feat.dtype)
-            return feat @ W  # (M, d_model)
-
+def test_fetch_dataloader():
     metadata = {
-        "equity": "aaau",
+        "equity": "AAPL",
         "time_frequency": "1min",
         "observation_horizon": 50,
         "prediction_horizon": 1,
         "news_observation_horizon": 50,
-        "news_retrieval_prompt": "Fetch news relevant to AAAU stock price movements.",
-        "news_resources": ["Reuters", "Bloomberg"],
+        "news_retrieval_prompt": "Fetch news articles related to {equity} in the last {news_observation_horizon} hours.",
+        "news_resources": ["finnhub"],
     }
+    loader = SignalingDataLoader(metadata)
+    train_loader, test_dataset = loader.fetch_dataloader()
+    print(f"Train batches: {len(train_loader)}, Test samples: {len(test_dataset)}")
 
-    loader = SignalingDataLoader(metadata=metadata)
-    large_model = DummyLargeModel(d_model=256)
-
-    # Test training pipeline
-    train_loader, test_dataset = loader.fetch_dataloader(large_model, train_ratio=0.8)
-    print(f"Train batches: {len(train_loader)}")
-    print(f"Test samples: {len(test_dataset)}")
-
-    # # Test inference data
-    # inference_window = loader.fetch_inference_data()
-    # print(f"Inference window shape: {inference_window.shape}")
-
-
+def test_fetch_inference_data():
+    metadata = {
+        "equity": "AAPL",
+        "time_frequency": "1min",
+        "observation_horizon": 50,
+        "prediction_horizon": 1,
+        "news_observation_horizon": 50,
+        "news_retrieval_prompt": "Fetch news articles related to {equity} in the last {news_observation_horizon} hours.",
+        "news_resources": ["finnhub"],
+    }
+    loader = SignalingDataLoader(metadata)
+    representation = loader.fetch_inference_data()
+    print(f"Inference representation shape: {representation.shape}")
 if __name__ == "__main__":
-    test_signaling_dataloader()
+    # test_fetch_dataloader()
+    test_fetch_inference_data()

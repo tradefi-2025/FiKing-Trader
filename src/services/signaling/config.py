@@ -6,9 +6,9 @@ import torch.nn as nn
 class SignalingConfig:
     name: str = "signaling"
     version: str = "v1"
-    batch_size: int = 32
+    batch_size: int = 8
     learning_rate: float = 0.001
-    d_model: int = 256
+    d_model: int = 1280
     nb_layers: int = 6
     activation = nn.GELU()
     lr: float = 0.001  # learning rate alias

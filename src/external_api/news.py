@@ -19,8 +19,8 @@ class FinnhubNewsCollector:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        api_pool_file: str = "/home/kian/private/FiKing-Trader/src/external_api/finnhub_api_pool.json",
-        output_dir: str = "/home/kian/private/FiKing-Trader/src/external_apis/finnhub_news_data",
+        api_pool_file: str = "src/external_api/finnhub_api_pool.json",
+        output_dir: str = "src/external_apis/finnhub_news_data",
         paginate: bool = True,
         page_delay_seconds: float = 1.0,
     ) -> None:
