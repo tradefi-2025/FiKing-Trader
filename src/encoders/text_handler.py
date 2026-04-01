@@ -52,6 +52,8 @@ class FlangService:
         if self.mlm_model is not None:
             self.mlm_model.eval()
 
+        self.batch_size = 16  # for encoding multiple texts; adjust as needed
+
     @torch.inference_mode()
     def encode(
         self,
@@ -73,30 +75,40 @@ class FlangService:
         if isinstance(texts, str):
             texts = [texts]
 
-        enc = self.tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        ).to(self.device)
+        batch_size = self.batch_size
+        batch_enc = []
+        for i in range(0, len(texts), batch_size):
+            print(f"Encoding batch {i} to {i+batch_size}...")
+            batch = texts[i : i + batch_size]
+            enc = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            ).to(self.device)
+            batch_enc.append(enc)
 
-        outputs = self.encoder(**enc)
-        last_hidden = outputs.last_hidden_state  # (B, T, H)
+        outputs = []
+        for enc in batch_enc:
+            model_out = self.encoder(**enc)
+            last_hidden = model_out.last_hidden_state  # (B, T, H)
 
-        if pooling == "cls":
-            # ELECTRA-style models put [CLS] at position 0
-            emb = last_hidden[:, 0]
-        elif pooling == "mean":
-            # mean over non-padding tokens
-            mask = enc["attention_mask"].unsqueeze(-1)  # (B, T, 1)
-            summed = (last_hidden * mask).sum(dim=1)
-            counts = mask.sum(dim=1).clamp(min=1)
-            emb = summed / counts
-        else:
-            raise ValueError(f"Unknown pooling: {pooling}")
+            if pooling == "cls":
+                # ELECTRA-style models put [CLS] at position 0
+                emb = last_hidden[:, 0]
+            elif pooling == "mean":
+                # mean over non-padding tokens
+                mask = enc["attention_mask"].unsqueeze(-1)  # (B, T, 1)
+                summed = (last_hidden * mask).sum(dim=1)
+                counts = mask.sum(dim=1).clamp(min=1)
+                emb = summed / counts
+            else:
+                raise ValueError(f"Unknown pooling: {pooling}")
 
-        return emb  # (B, H)
+            outputs.append(emb)
+
+        return torch.cat(outputs, dim=0)  # (B, H)
 
     @torch.inference_mode()
     def fill_mask(

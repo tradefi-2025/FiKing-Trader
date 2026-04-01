@@ -16,6 +16,8 @@ from ...external_api.news import FinnhubNewsCollector
 
 logger = logging.getLogger(__name__)
 
+def tan(x):
+    return torch.tan(x-torch.pi/2)
 def fetch_news_embeddings(equity: str,prompt: str, From,To) -> torch.Tensor:
     '''
     Fetch news articles related to the equity between the given timestamps, pass them through a large language model to get embeddings, and return a tensor of shape (N, embedding_dim) where N is the number of news articles.
@@ -96,19 +98,24 @@ class SignalingDataLoader:
             DataFrame indexed by timestamp with columns:
             [open, high, low, close, volume]
         """
+        logger.info(f"Fetching OHLCV data for {self.equity} at {self.frequency} from MongoDB...")
         records = self.db.get_timeseries(
             equity=self.equity,
             frequency=self.frequency,
         )
         if not records:
-            records=self.rd.get_ohlc_df_for_mongo(self.equity, self.frequency)
-        
+            logger.warning(f"No OHLCV records found for {self.equity} at {self.frequency} fetching from MongoDB, falling back to Refinitiv...")
+            records=self.rd.get_ohlc_df_for_mongo(self.equity, interval=self.frequency)
+            records=records.reset_index().to_dict(orient="records")
         if not records:
+            
             raise ValueError(f"No OHLCV records found for {self.equity} at {self.frequency}")
-
+        
+        logger.info(f"Fetched {len(records)} OHLCV records for {self.equity} at {self.frequency}. Sample:\n{records[:5]}")
         df = pd.DataFrame(records)[["timestamp", "open", "high", "low", "close", "volume"]]
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
+        logger.info(f"Constructed OHLCV DataFrame with shape {df.shape} and columns {df.columns.tolist()}")
         return df.set_index("timestamp").sort_index()
 
    
@@ -152,17 +159,16 @@ class SignalingDataLoader:
 
         # Need space to look prediction_horizon steps ahead
         values = values[:-prediction_horizon]
-        values = (values[1:]/(values[:-1]+1e-8)).log()  # log returns between consecutive candles
-        close_col = close_col[:-prediction_horizon]
-
+        values = (values[1:]/(values[:-1]+1e-8)).log()*1e4  # log returns between consecutive candles
+        
         # Build X with unfold over time dimension
         X = values.unfold(0, self.window_size, step)  # (M_raw, 5, window_size)
         
         X = X.permute(0, 2, 1)                        # (M_raw, window_size, 5)
         # Build Y as the future return from last candle in window to prediction horizon
-        end_indices = torch.arange(self.window_size - 1, len(values)-prediction_horizon, step)  # indices of last candle in each window
+        end_indices = torch.arange(self.window_size - 1, len(values), step)  # indices of last candle in each window
         pred_horizons = end_indices+prediction_horizon  # indices of the candle we want to predict
-        Y = (close_col[pred_horizons]/close_col[end_indices]).log().unsqueeze(-1)  # log return from last candle in window to prediction horizon candle
+        Y = ((close_col[pred_horizons]/close_col[end_indices]).log()*1e4).unsqueeze(-1)  # log return from last candle in window to prediction horizon candle
         end_timestamps = norm_df.index[end_indices.tolist()].tolist()
         return X, Y, end_timestamps
     def _ensure_contextualizer_channel(self) -> None:
@@ -190,7 +196,7 @@ class SignalingDataLoader:
         request = {
             "equity": equity,
             "timestamps": [str(t) for t in timestamps],
-            "ts": ts.tolist(),
+            "ts": ts.tolist() if ts is not None else None,
             "text": text,
         }
 
@@ -216,7 +222,7 @@ class SignalingDataLoader:
             ),
         )
 
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + 1000.0
         while response["body"] is None:
             self._ctx_connection.process_data_events(time_limit=1)
             if time.monotonic() >= deadline:
@@ -252,7 +258,22 @@ class SignalingDataLoader:
         """
         # prompt and resources parameters are placeholders for a future
         # external retrieval / embedding pipeline.
-        return self.db.get_news_embeddings(equity=equity, start=None, end=None)
+        # return self.db.get_news_embeddings(equity=equity, start=None, end=None)
+        news=self.finnhub_collector.collect(entities=equity, start_date=None, end_date=None, fields=["Date", "Article"])
+        list_articles = [r["Article"] for r in news]
+        if not list_articles:
+                list_articles = [""]
+        timestamps =  [pd.to_datetime(n['Date']) for n in news]
+        #print(f"Fetched {len(list_articles)} news articles for {equity}. Sample:\n{list_articles[:3]}")
+        embeddings= self._request_contextualizer(
+                equity,
+                timestamps,
+                None,
+                list_articles,
+            )
+        return {"timestamps": timestamps, "embeddings": embeddings}
+    
+
 
     def _align_news_to_windows(self, end_timestamps: list) -> list[torch.Tensor]:
         """
@@ -270,9 +291,16 @@ class SignalingDataLoader:
             prompt=self.news_retrieval_prompt,
             resources=self.news_resources,
         )
-        timestamps = news["timestamps"]
-        embeddings = news["embeddings"]
+        def _to_utc(ts):
+            t = pd.Timestamp(ts)
+            if t.tzinfo is None:
+                return t.tz_localize("UTC")
+            return t.tz_convert("UTC")
 
+        timestamps = [_to_utc(t) for t in news["timestamps"]]
+        end_timestamps = [_to_utc(t) for t in end_timestamps]
+        embeddings = news["embeddings"]
+        
         if embeddings.numel() == 0:
             # No news at all — return a single zero vector per window
             return [torch.zeros(1, 768) for _ in end_timestamps]
@@ -282,7 +310,6 @@ class SignalingDataLoader:
             idx_sorted = sorted(range(len(timestamps)), key=lambda i: timestamps[i])
             timestamps = [timestamps[i] for i in idx_sorted]
             embeddings = embeddings[idx_sorted]
-
         embedding_dim = embeddings.shape[1]
         horizon = self.news_observation_horizon
 
@@ -302,6 +329,7 @@ class SignalingDataLoader:
                 indices = sorted(indices, key=lambda i: timestamps[i], reverse=True)
                 window_embs = embeddings[indices]  # (K, embedding_dim)
             else:
+                # print(f"No news for window ending at {end_ts} (lookback to {start_ts})")
                 # No news in this window
                 window_embs = torch.zeros(1, embedding_dim)
 
@@ -347,40 +375,53 @@ class SignalingDataLoader:
             train_loader: DataLoader yielding (representation, Y) batches.
             test_dataset: TensorDataset for evaluation.
         """
+        logger.info("Starting to fetch dataloader...")
         # Step 1: OHLCV → normalize → sliding windows
         raw_df = self._fetch_df()
+        logger.info(f"Fetched raw OHLCV data with {len(raw_df)} records. Sample:\n{raw_df.head()}")
         # norm_df = self._normalize(raw_df)
         X_ohlcv, Y, end_timestamps = self._build_sequences(raw_df)
-        
+        #print(X_ohlcv.shape, Y.shape, len(end_timestamps))
+        logger.info(f"Built {len(X_ohlcv)} OHLCV windows. Sample window shape: {X_ohlcv[0].shape}, Y shape: {Y.shape}")
         # X_ohlcv: (M, window_size, 5), Y: (M, 1)
 
         # Step 2: fetch and align news embeddings
         X_news_list = self._align_news_to_windows(end_timestamps)
-        X_news = self._pad_news_windows(X_news_list)
-        
-        # X_news: (M, max_news_per_window, embedding_dim)
+        X_news = torch.stack([x.mean(dim=0) for x in X_news_list])
+        #print(X_news)
+        #print(X_news.shape)
+        # X_news: (M, embedding_dim)
 
         # Step 3: pass (OHLCV, news) pairs through the large model
         # The large model fuses both modalities and produces representation vectors
-        
+        logger.info("Passing data through the large model...")
 
         # representations : (M, d_model=256)
-        ts_representations = self._request_contextualizer(
-            self.equity,
-            end_timestamps,
-            X_ohlcv,
-            None,
-        )
+        ctx_batch_size = 100
+        ctx_batches = []
+        for i in range(0, len(end_timestamps), ctx_batch_size):
+            j = i + ctx_batch_size
+            batch_timestamps = end_timestamps[i:j]
+            batch_ts = X_ohlcv[i:j]
+            batch_reps = self._request_contextualizer(
+                self.equity,
+                batch_timestamps,
+                batch_ts,
+                None,
+            )
+            ctx_batches.append(batch_reps)
+        ts_representations = torch.cat(ctx_batches, dim=0)
+        logger.info(f"Received contextualizer representations with shape: {ts_representations.shape}")
         
 
-        representations = torch.cat([ts_representations, X_news.mean(dim=1)], dim=1)
+        representations = torch.cat([ts_representations, X_news], dim=1)
         # Step 4: shuffle before splitting
         perm = torch.randperm(len(representations))
         representations = representations[perm]
         Y = Y[perm]
 
         split = int(len(representations) * train_ratio)
-        print(f"Total samples: {len(representations)}, Train: {split}, Test: {len(representations) - split}")
+        logger.info(f"Total samples: {len(representations)}, Train: {split}, Test: {len(representations) - split}")
         train_loader = DataLoader(
             TensorDataset(representations[:split], Y[:split]),
             batch_size=self.config.batch_size,
@@ -404,7 +445,7 @@ class SignalingDataLoader:
             torch.Tensor of shape (1, window_size, 5)
         """
         try:
-            time_now = pd.Timestamp.now()-pd.Timedelta(days=3)  # buffer to ensure we get the latest closed candle
+            time_now = pd.Timestamp.now()
             start_time = time_now - self.frequency_to_timedelta[self.frequency] * self.window_size
             ts= self.rd.get_ohlc_tensor(
                 equity_ric=self.equity,
@@ -442,23 +483,29 @@ def test_fetch_dataloader():
     metadata = {
         "equity": "AAPL",
         "time_frequency": "1min",
-        "observation_horizon": 50,
-        "prediction_horizon": 1,
-        "news_observation_horizon": 50,
+        "observation_horizon": 1000,
+        "prediction_horizon": 240,
+        "news_observation_horizon": 3000,
         "news_retrieval_prompt": "Fetch news articles related to {equity} in the last {news_observation_horizon} hours.",
         "news_resources": ["finnhub"],
     }
     loader = SignalingDataLoader(metadata)
     train_loader, test_dataset = loader.fetch_dataloader()
+    for batch in train_loader:
+        X_batch, Y_batch = batch
+        logger.info(f"Train batch - X shape: {X_batch.shape}, Y shape: {Y_batch.shape}")
+        #print(Y_batch)
+        #print(X_batch[:,-364:])
+        break
     print(f"Train batches: {len(train_loader)}, Test samples: {len(test_dataset)}")
 
 def test_fetch_inference_data():
     metadata = {
         "equity": "AAPL",
         "time_frequency": "1min",
-        "observation_horizon": 50,
-        "prediction_horizon": 1,
-        "news_observation_horizon": 50,
+        "observation_horizon": 1000,
+        "prediction_horizon": 240,
+        "news_observation_horizon": 1240,
         "news_retrieval_prompt": "Fetch news articles related to {equity} in the last {news_observation_horizon} hours.",
         "news_resources": ["finnhub"],
     }
@@ -466,5 +513,5 @@ def test_fetch_inference_data():
     representation = loader.fetch_inference_data()
     print(f"Inference representation shape: {representation.shape}")
 if __name__ == "__main__":
-    # test_fetch_dataloader()
-    test_fetch_inference_data()
+    test_fetch_dataloader()
+    # test_fetch_inference_data()

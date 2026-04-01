@@ -3,8 +3,21 @@
         "name": "kronos-small",
         "output_dim": 512
     },
+    "encoders": [
+        {
+        "name": "flang-small",
+        "output_dim": 768
+        },
+        {
+        "name": "finbert",
+        "output_dim": 384
+        }
+    ],
     "text_encoder": {
         "name": "flang-small",
         "output_dim": 768
-    }
+        }
+
+
 }
+

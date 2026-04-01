@@ -117,7 +117,7 @@ class MongoDBService:
         try:
             # agents_weights indexes
             weights = self.db["agents_weights"]
-            weights.create_index([("agent_id", ASCENDING)], unique=True, name="agent_id_unique")
+            weights.create_index([("model_id", ASCENDING)], unique=True, name="model_id_unique")
             weights.create_index([("agent_name", ASCENDING)], name="agent_name_idx")
             weights.create_index([("equity", ASCENDING)], name="equity_idx")
             weights.create_index([("created_at", DESCENDING)], name="created_at_desc")
@@ -159,7 +159,7 @@ class MongoDBService:
 
     def push_agent_weights(
         self,
-        agent_id: str,
+        model_id: str,
         agent_name: str,
         weights: Any,
         *,
@@ -176,7 +176,7 @@ class MongoDBService:
 
             now = datetime.utcnow()
             payload: Dict[str, Any] = {
-                "agent_id": agent_id,
+                "model_id": model_id,
                 "agent_name": agent_name,
                 "version": version,
                 "weights_data": weights_bytes,
@@ -188,15 +188,15 @@ class MongoDBService:
             }
 
             result = self.db["agents_weights"].update_one(
-                {"agent_id": agent_id},
+                {"model_id": model_id},
                 {"$set": payload, "$setOnInsert": {"created_at": now}},
                 upsert=True,
             )
             ok = bool(result.upserted_id or result.modified_count)
             if ok:
-                logger.info("✅ Saved weights for agent %s", agent_id)
+                logger.info("✅ Saved weights for agent %s", model_id)
             else:
-                logger.warning("⚠️ No changes when saving weights for agent %s", agent_id)
+                logger.warning("⚠️ No changes when saving weights for agent %s", model_id)
             return ok
 
         except Exception as exc:
@@ -205,12 +205,12 @@ class MongoDBService:
                 raise
             return False
 
-    def get_agent_weights(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def get_agent_weights(self, model_id: str) -> Optional[Dict[str, Any]]:
         """Load agent model weights and metadata from the database."""
         try:
-            doc = self.db["agents_weights"].find_one({"agent_id": agent_id})
+            doc = self.db["agents_weights"].find_one({"model_id": model_id})
             if not doc:
-                logger.warning("⚠️ Agent not found: %s", agent_id)
+                logger.warning("⚠️ Agent not found: %s", model_id)
                 return None
 
             weights = torch.load(
@@ -219,7 +219,7 @@ class MongoDBService:
             )
 
             return {
-                "agent_id": doc["agent_id"],
+                "model_id": doc["model_id"],
                 "agent_name": doc["agent_name"],
                 "version": doc["version"],
                 "weights": weights,
@@ -262,14 +262,14 @@ class MongoDBService:
                 raise
             return []
 
-    def delete_agent(self, agent_id: str) -> bool:
+    def delete_agent(self, model_id: str) -> bool:
         """Delete an agent's weights and metadata."""
         try:
-            result = self.db["agents_weights"].delete_one({"agent_id": agent_id})
+            result = self.db["agents_weights"].delete_one({"model_id": model_id})
             if result.deleted_count:
-                logger.info("✅ Deleted agent %s", agent_id)
+                logger.info("✅ Deleted agent %s", model_id)
                 return True
-            logger.warning("⚠️ Agent not found for deletion: %s", agent_id)
+            logger.warning("⚠️ Agent not found for deletion: %s", model_id)
             return False
         except Exception as exc:
             logger.error("❌ Error deleting agent: %s", exc)
@@ -328,6 +328,7 @@ class MongoDBService:
             }
         """
         articles = self.get_news(equity, start=start, end=end)
+        print(len(articles))
         timestamps: List[datetime] = []
         embeddings: List[torch.Tensor] = []
 
@@ -634,11 +635,11 @@ class MongoDBService:
             info = self.db["agents_weights"].index_information()
             details["agents_weights_indexes"] = list(info.keys())
             has_unique_agent = any(
-                idx.get("unique") is True and idx.get("key") == [("agent_id", 1)]
+                idx.get("unique") is True and idx.get("key") == [("model_id", 1)]
                 for idx in info.values()
             )
             if not has_unique_agent:
-                issues.append("agents_weights missing unique index on agent_id")
+                issues.append("agents_weights missing unique index on model_id")
         except Exception as exc:
             issues.append(f"could not inspect agents_weights indexes: {exc}")
 
@@ -735,6 +736,9 @@ if __name__ == "__main__":
     # stats = get_all_ts_stats(service, list(equities.keys())[:200], frequencies)
     # json.dump(stats, open("timeseries_stats.json", "w"), indent=4, default=str)
 
-    srvice = MongoDBService()
-    update_listed_equities(["AAPL", "MSFT"], srvice, frequency="1min")
-    print(get_all_ts_stats(MongoDBService(), ["aapl", "MSFT"], ["1min","1d", "1h"]))
+    # srvice = MongoDBService()
+    # update_listed_equities(["AAPL", "MSFT"], srvice, frequency="1min")
+    # print(get_all_ts_stats(MongoDBService(), ["aapl", "MSFT"], ["1min","1d", "1h"]))
+    service = MongoDBService()
+    res=service.get_news_embeddings(equity='AAPL', start=None, end=None)
+    print(res['embeddings'])

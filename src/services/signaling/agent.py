@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class Agent:
-    def __init__(self, meta_data=None, model=None, dataloader=None, verification=None):
+    def __init__(self, meta_data=None, model=None, dataloader=None, verification=None,stop_event=None):
         self.meta_data = meta_data
         self.model = model
         self.dl = dataloader
         self.verification = verification
         self.config = SignalingConfig()
+        self.model_id = self.meta_data.get('model_id', 'default_model_id')
         
         # RabbitMQ setup
         self.rabbitmq_host = os.getenv('RABBITMQ_HOST', 'localhost')
@@ -29,15 +30,18 @@ class Agent:
         self.rabbitmq_password = os.getenv('RABBITMQ_PASSWORD', 'guest')
         
         # Queue names
-        self.inference_queue_name = f'inference_queue_{agent_id}'
+        self.inference_queue_name = f'inference_queue_{self.model_id}'
+        self.stop_queue = f'stop_queue_{self.model_id}'
         
         # Thread control (thread-safe)
-        self.stop_event = threading.Event()
+        self.global_stop_event = stop_event # Event to signal threads to stop
+        self.stop_event=threading.Event()  # Local event to control this agent's threads
         self.stop_event.set()  # Initially stopped
         self.inference_thread = None
         self.main_loop_thread = None
         self.mongo_service = MongoDBService()
         self.postgres_service = PostgreSQLService()
+        self.client = None  # Placeholder for any external API client (e.g., trading API)
     
     def _get_rabbitmq_connection(self):
         """Create RabbitMQ connection"""
@@ -50,12 +54,19 @@ class Agent:
         return pika.BlockingConnection(parameters)
 
     def build_and_store(self):
-        dataloader,test_dataset = self.dl.fetch_dataloader()
-        self.model.fit(dataloader)
-        # Store the model (e.g., save to disk or database)
-        raise NotImplementedError("Model storage not implemented yet")
-        self.mongo_service.push_agent_weights(agent_id=self.meta_data['agent_id'], weights=self.model.state_dict())
-        self.postgres_service.update_model_metadata({'status': 'trained'}, self.meta_data['agent_id'])
+        try:
+            logger.info("Building dataloader and model...")
+            dataloader, test_dataset = self.dl.fetch_dataloader()
+            logger.info(f"Fetched dataloader with {len(dataloader)} batches and test dataset with {len(test_dataset)} samples")
+            self.model.fit(dataloader)
+            self.model.test(test_dataset)
+            # Store the model (e.g., save to disk or database)
+            self.mongo_service.push_agent_weights(model_id=self.meta_data['model_id'], weights=self.model.state_dict(), agent_name=self.meta_data['agent_name'])
+            # self.postgres_service.update_model_metadata({'status': 'trained'}, self.meta_data['model_id'])
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to train model: {self.meta_data.get('model_id', 'unknown')}. Error: {str(e)}")
+            return False
 
     
     def launch(self):
@@ -76,6 +87,9 @@ class Agent:
         self.inference_thread = threading.Thread(target=self._consume_inference_queue, daemon=False)
         self.inference_thread.start()
         logger.info("Inference consumer thread started")
+
+
+        return self.main_loop_thread, self.inference_thread, self.stop_event
 
     def _consume_inference_queue(self):
         """Wait on the RabbitMQ queue for inference requests made by the user"""
@@ -107,7 +121,7 @@ class Agent:
                     response = {
                         'inference_result': result,
                         'verification': verification_result,
-                        'agent_id': self.meta_data.get('agent_id'),
+                        'model_id': self.meta_data.get('model_id'),
                         'timestamp': time.time()
                     }
                     
@@ -137,7 +151,7 @@ class Agent:
                     if properties.reply_to:
                         error_response = {
                             'error': str(e),
-                            'agent_id': self.meta_data.get('agent_id'),
+                            'model_id': self.meta_data.get('model_id'),
                             'timestamp': time.time()
                         }
                         try:
@@ -158,21 +172,27 @@ class Agent:
             # Set QoS
             channel.basic_qos(prefetch_count=1)
             
-            # Start consuming
-            channel.basic_consume(
-                queue=self.inference_queue_name,
-                on_message_callback=callback
-            )
+            
+
             
             logger.info(f"Started consuming from queue: {self.inference_queue_name}")
             
-            while not self.stop_event.is_set():
+            channel.basic_consume(
+                queue=self.inference_queue_name,
+                on_message_callback=callback,
+            )
+
+            logger.info(f"Started consuming from queue: {self.inference_queue_name}")
+
+            # Main loop: process messages and check stop_event
+            while not (self.stop_event.is_set() or self.global_stop_event.is_set()):
                 try:
+                    # process pending events, but return every 1 second
                     channel.connection.process_data_events(time_limit=1)
                 except Exception as e:
                     logger.error(f"Error in consume loop: {str(e)}")
                     break
-            
+ 
             connection.close()
             logger.info("Inference consumer stopped")
             
@@ -186,11 +206,14 @@ class Agent:
         """
         freq = self.meta_data.get('signal_frequency', self.config.default_frequency)
         
-        while not self.stop_event.is_set():
+        while not (self.stop_event.is_set() or self.global_stop_event.is_set()):
             try:
                 # Fetch new data for inference
                 input_data = self.dl.fetch_inference_data()
-                
+                if input_data is None:
+                    logger.warning("No input data fetched for inference")
+                    time.sleep(freq)
+                    continue
                 # Make predictions with the model
                 confidence_level = self.meta_data.get('confidence_level', self.config.default_confidence_level)
                 result = self.model.inference(input_data, confidence_level)
@@ -201,10 +224,10 @@ class Agent:
                 # if results are good then send a signal to the user or execute a trade
                 if result['estimated action'] == 1 and verification_result['is_valid']:
                     # Send buy signal or execute buy trade
-                    self.config.send_signal('long')
+                    self.config.send_signal(message='long',destination=self.client)
                 elif result['estimated action'] == -1 and verification_result['is_valid']:
                     # Send sell signal or execute sell trade
-                    self.config.send_signal('short')
+                    self.config.send_signal(message='short',destination=self.client)
                 
                 # Log or store results as needed
                 logger.info(f"Prediction: {result}, Verification: {verification_result}")
@@ -218,15 +241,5 @@ class Agent:
         
         logger.info("Main loop stopped")
     
-    def stop(self):
-        """Stop the agent"""
-        logger.info("Stopping agent...")
-        self.stop_event.set()  # Signal threads to stop
-        
-        if self.main_loop_thread and self.main_loop_thread.is_alive():
-            self.main_loop_thread.join(timeout=10)
-        if self.inference_thread and self.inference_thread.is_alive():
-            self.inference_thread.join(timeout=10)
-        
-        logger.info("Agent stopped")
+
 

@@ -14,7 +14,7 @@ import redis
 # Load environment variables
 load_env()
 
-def verify(body, service):
+def verify(body):
     """
     Verify the request body for model creation
     
@@ -66,13 +66,13 @@ def get_status():
 
 # ==================== Model/Agent Management ====================
 
-@app.route('/model/<service>/create', methods=['POST'])
-def create_model(service):
+@app.route('/model/create', methods=['POST'])
+def create_model():
     """
     Create and configure a forecasting model instance
     
     Request Body:
-        - entity_name: Financial instrument identifier
+        - entity: Financial instrument identifier
         - time_frequency: Time resolution (1MIN, 5MIN, 1H, 1D, etc.)
         - observation_horizon: Number of past time steps for input
         - prediction_horizon: Number of time steps ahead to forecast
@@ -92,14 +92,14 @@ def create_model(service):
     """
 
     body = request.get_json()
-    if verify(body, service) == False:
+    if verify(body) == False:
         return jsonify({
             'status': 'REJECTED',
             'valid': False,
             'message': 'Invalid request body. Please check the required fields and formats.',
             'service': service
         }), 400
-
+    service = body.get('service', 'unknown')
     print(f"Received model creation request for service: {service} with body: {body}")
     queue = f'{service}_training_queue'
     pika_connection = pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost')))
@@ -122,8 +122,9 @@ def create_model(service):
 
     
 
-@app.route('/model/<service>/<model_id>/start', methods=['POST'])
-def start_model(service, model_id):
+@app.route('/model/start', methods=['POST'])
+def start_model( ):
+
     """
     Start/launch a trained model for continuous prediction
     
@@ -134,6 +135,9 @@ def start_model(service, model_id):
         - status: SUCCESS or FAILURE
         - message: Result description
     """
+    body = request.get_json() or {}
+    model_id = body.get('model_id')
+    service = body.get('service')
     # Check Redis availability
     if redis_client is None:
         return jsonify({
@@ -141,8 +145,8 @@ def start_model(service, model_id):
             'message': 'Redis not available. Cannot check agent status.'
         }), 503
     
-    body = request.get_json() or {}
     # Check if model is already active
+
     if redis_client.sismember(f'active_agents:{service}', model_id):
         return jsonify({
             'status': 'ERROR',

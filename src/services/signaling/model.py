@@ -1,8 +1,14 @@
+import os
+import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 from .config import SignalingConfig
+import matplotlib.pyplot as plt
+
+import logging
+logger = logging.getLogger(__name__)
 
 class SignalingModelV1(nn.Module):
 
@@ -33,11 +39,10 @@ class SignalingModelV1(nn.Module):
         o5 = self.layer_norm2(o5+o2)  # Use layer_norm2 for d_model//4
         out = self.out(o5)
 
-        mu= out[:,0]
-        logvar=out[:,1]
+        mu= out[:,0].unsqueeze(-1)
+        logvar=out[:,1].unsqueeze(-1)
         
         pred= logvar.exp()*torch.randn((B,1),requires_grad=False) 
-
         return pred, mu, logvar
 
     def reconstruction_loss(self,pred,Y):
@@ -56,7 +61,21 @@ class SignalingModelV1(nn.Module):
                 loss.backward()
                 optimizer.step()
 
-            print(f"loss epoch{epoch} / {self.config.epoch} : {l/len(dataloader)}")
+            logger.info(f"loss epoch{epoch} / {self.config.epoch} : {l/len(dataloader)}")
+
+    def test(self,test_dataset):
+        self.eval()
+        with torch.no_grad():
+            X, Y = test_dataset.tensors
+            pred, _,_ = self(X)
+            loss=self.reconstruction_loss(pred,Y)
+        logger.info(f"Test loss: {loss.item()}")
+        plt.plot(pred.cpu().numpy(), label="Predicted")
+        plt.plot(Y.cpu().numpy(), label="Actual")
+        plt.legend()
+        plt.title("Predicted vs Actual")
+        self._finalize_plot("pred_vs_actual")
+        
 
     def inference(self, input_data, confidence_level):
         with torch.no_grad():
@@ -116,19 +135,81 @@ def test_signaling_model():
     input_data = torch.randn(1, config.d_model)
     confidence_level = 0.95
     result = model.inference(input_data, confidence_level)
-    print(result)
+    logger.info("Inference result: %s", result)
 
 if __name__ == "__main__":
     test_signaling_model()
 
 
-class SignalingModelV2:
+class SignalingModelV2(nn.Module):
 
     def __init__(self, config):
+        super(SignalingModelV2, self).__init__()
         self.config = config
+        self.sequential = nn.Sequential(
+            nn.Linear(config.d_model, 1)
+        )
+    
+    
+    def reconstruction_loss(self,pred,Y):
+        return F.mse_loss(pred,Y)
+    
 
-    def fit(self, data):
-        pass
+    def fit(self, dataloader):
+        optimizer=torch.optim.Adam(self.parameters(),lr=self.config.lr) 
+        
+        for epoch in range(self.config.epoch):
+            l=0
+            for X, Y in dataloader:
+                optimizer.zero_grad()
+                pred= self(X)
+                loss=self.reconstruction_loss(pred,Y)
+                l+=loss.item()
+                loss.backward()
+                optimizer.step()
 
-    def inference(self, input_data):
-        pass
+            logger.info(f"loss epoch{epoch} / {self.config.epoch} : {l/len(dataloader)}")
+
+    def forward(self, input_data):
+        return self.sequential(input_data)
+    
+    def test(self,test_dataset):
+        self.eval()
+        with torch.no_grad():
+            X, Y = test_dataset.tensors
+            pred= self(X)
+            loss=self.reconstruction_loss(pred,Y)
+
+        logger.info(f"Test loss: {loss.item()}")
+        # still on CPU here (use .cpu() earlier if needed)
+        pred_cpu = pred.detach().cpu()
+        y_cpu = Y.detach().cpu()
+
+        idx = torch.arange(pred_cpu.shape[0])
+
+        plt.scatter(idx.numpy(), pred_cpu.numpy(), label="Predicted")
+        plt.scatter(idx.numpy(), y_cpu.numpy(), label="Actual")
+        plt.legend()
+        plt.title("Predicted vs Actual over index")
+        self._finalize_plot("pred_vs_actual_index")
+
+    def _finalize_plot(self, name):
+        if threading.current_thread() is threading.main_thread():
+            plt.show()
+            return
+
+        plot_dir = os.getenv("SIGNALING_PLOT_DIR", "logs/signaling_plots")
+        os.makedirs(plot_dir, exist_ok=True)
+        filename = os.path.join(plot_dir, f"{name}_{os.getpid()}.png")
+        plt.savefig(filename, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    def inference(self, input_data, confidence_level):
+        with torch.no_grad():
+            pred = self(input_data)
+            
+            res = {
+                "estimated price"  : round(pred.item(),2),
+                "estimated action" : t_test(pred, torch.ones_like(pred), confidence_level).item()
+            }
+        return res

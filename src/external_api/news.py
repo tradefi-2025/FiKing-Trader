@@ -50,7 +50,7 @@ class FinnhubNewsCollector:
 
         Args:
             entities: List of symbols (default ['AAPL'])
-            start_date: 'YYYY-MM-DD' (default now - 30 days)
+            start_date: 'YYYY-MM-DD' (default now - 365 days)
             end_date: 'YYYY-MM-DD' (default now)
             fields: Dictionary of fields to include in each record
 
@@ -59,7 +59,7 @@ class FinnhubNewsCollector:
         """
         entities = entities or ["AAPL"]
         end_date = end_date or datetime.now().strftime("%Y-%m-%d")
-        start_date = start_date or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        start_date = start_date or (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
         all_records: List[Dict] = []
 

@@ -1,6 +1,9 @@
 import os
 import json
 import logging
+import signal
+import signal
+import sys
 import threading
 import pika
 from src.utils.env import load_env
@@ -8,7 +11,7 @@ import redis
 
 from .config import SignalingConfig
 from .dl import SignalingDataLoader
-from .model import SignalingModelV1
+from .model import SignalingModelV2
 from .verification import SignalingVerification
 from .agent import Agent
 from ...database_handlers.mongoDB import MongoDBService
@@ -23,7 +26,8 @@ class SignalingWorker:
 
     def __init__(self):
         self.config = SignalingConfig()
-        
+
+        self.stop_event = threading.Event()  # Event to signal threads to stop
         # RabbitMQ configuration
         self.rabbitmq_host = os.getenv('RABBITMQ_HOST', 'localhost')
         self.rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 5672))
@@ -37,7 +41,7 @@ class SignalingWorker:
             decode_responses=True
         )
         self.redis_dict_name = "active_agents:signaling"
-
+        self.redis_client.delete(self.redis_dict_name)  # Clear existing set on startup
         # Queue name for training requests (specific to signaling service)
         self.training_queue_name = 'signaling_training_queue'
         self.launch_queue_name = 'signaling_launch_queue'
@@ -53,11 +57,11 @@ class SignalingWorker:
         self.max_concurrent_launches = int(os.getenv('MAX_CONCURRENT_LAUNCHES', 3))
         
         # Agent tracking for launched agents
-        self.active_agents = {}  # {agent_id: Agent instance}
+        self.active_agents = {}  # {model_id: Agent instance}
         self.agents_lock = threading.Lock()
 
         #Agent tracking for training
-        self.training_agents = {}  # {agent_id: Agent instance}
+        self.training_agents = {}  # {model_id: Agent instance}
         self.training_agents_lock = threading.Lock()
         
         # Channel reference for graceful shutdown
@@ -81,7 +85,7 @@ class SignalingWorker:
         Process a launch request by initializing an agent, fetching the model weights from MongoDB, and launching the agent
         
         Args:
-            request_data: Dictionary containing launch request parameters including agent_id
+            request_data: Dictionary containing launch request parameters including model_id
             reply_to: Optional reply queue name for sending response
             correlation_id: Optional correlation ID for response matching
         
@@ -89,38 +93,38 @@ class SignalingWorker:
             bool: True if launch successful, False otherwise
         """
         try:
-            agent_id = request_data.get('agent_id')
-            logger.info(f"Processing launch request for agent: {agent_id}")
+            model_id = request_data.get('model_id')
+            logger.info(f"Processing launch request for agent: {model_id}")
             
             # Check if agent is already running
             with self.agents_lock:
-                if agent_id in self.active_agents:
-                    logger.warning(f"Agent {agent_id} is already running")
+                if model_id in self.active_agents:
+                    logger.warning(f"Agent {model_id} is already running")
                     # Send error response if reply_to is specified
                     if reply_to:
                         self._send_launch_response(
                             reply_to=reply_to,
                             correlation_id=correlation_id,
-                            agent_id=agent_id,
+                            model_id=model_id,
                             success=False,
                             message="Agent is already running"
                         )
                     return False
             
             # Load model weights from MongoDB
-            logger.info(f"Loading model weights from MongoDB for agent: {agent_id}")
+            logger.info(f"Loading model weights from MongoDB for agent: {model_id}")
             mongo_service = MongoDBService()
-            model_data = mongo_service.load_agent_weights(agent_id)
+            model_data = mongo_service.get_agent_weights(model_id)
             mongo_service.close()
             
             if not model_data:
-                logger.error(f"❌ Model weights not found for agent: {agent_id}")
+                logger.error(f"❌ Model weights not found for agent: {model_id}")
                 # Send error response if reply_to is specified
                 if reply_to:
                     self._send_launch_response(
                         reply_to=reply_to,
                         correlation_id=correlation_id,
-                        agent_id=agent_id,
+                        model_id=model_id,
                         success=False,
                         message="Model weights not found"
                     )
@@ -128,7 +132,7 @@ class SignalingWorker:
             
             # Extract metadata for dataloader
             metadata_dataloader = {
-                'equity': request_data.get('entity_name') or model_data.get('equity'),
+                'equity': request_data.get('equity') or model_data.get('equity'),
                 'observation_horizon': request_data.get('observation_horizon'),
                 'prediction_horizon': request_data.get('prediction_horizon'),
                 'time_frequency': request_data.get('time_frequency'),
@@ -143,7 +147,7 @@ class SignalingWorker:
             
             # Create model object and load weights
             logger.info("Creating model and loading weights...")
-            model = SignalingModelV1(self.config)
+            model = SignalingModelV2(self.config)
             model.load_state_dict(model_data['weights'])  # Load the trained weights
             model.eval()  # Set to evaluation mode
             
@@ -157,20 +161,25 @@ class SignalingWorker:
                 meta_data=request_data,
                 model=model,
                 dataloader=dataloader,
-                verification=verification
+                verification=verification,
+                stop_event=self.stop_event
             )
             
             # Store agent reference before launching (thread-safe)
-            with self.agents_lock:
-                self.active_agents[agent_id] = agent
-                self.redis_client.sadd(self.redis_dict_name, agent_id)
-
             
             # Launch the agent (starts main loop and inference consumer threads)
-            logger.info(f"Launching agent: {agent_id}...")
-            agent.launch()
+            logger.info(f"Launching agent: {model_id}...")
+            main_loop_thread, inference_thread, stop_event = agent.launch()
+            with self.threads_lock:
+                self.active_threads.append(main_loop_thread)
+                self.active_threads.append(inference_thread)
             
-            logger.info(f"✅ Successfully launched agent: {agent_id}")
+            with self.agents_lock:
+                self.active_agents[model_id] = stop_event
+                self.redis_client.sadd(self.redis_dict_name, model_id)
+
+            
+            logger.info(f"✅ Successfully launched agent: {model_id}")
             logger.info(f"📊 Active agents: {len(self.active_agents)}")
             
             # Send response to reply_to queue if specified
@@ -178,7 +187,7 @@ class SignalingWorker:
                 self._send_launch_response(
                     reply_to=reply_to,
                     correlation_id=correlation_id,
-                    agent_id=agent_id,
+                    model_id=model_id,
                     success=True,
                     message="Agent launched successfully"
                 )
@@ -193,26 +202,26 @@ class SignalingWorker:
                 self._send_launch_response(
                     reply_to=reply_to,
                     correlation_id=correlation_id,
-                    agent_id=agent_id,
+                    model_id=model_id,
                     success=False,
                     message=str(e)
                 )
             
             # Clean up agent reference on failure
             with self.agents_lock:
-                if agent_id in self.active_agents:
-                    del self.active_agents[agent_id]
-                    self.redis_client.srem(self.redis_dict_name, agent_id)
+                if model_id in self.active_agents:
+                    del self.active_agents[model_id]
+                    self.redis_client.srem(self.redis_dict_name, model_id)
             return False
     
-    def _send_launch_response(self, reply_to, correlation_id, agent_id, success, message):
+    def _send_launch_response(self, reply_to, correlation_id, model_id, success, message):
         """
         Send a response to the reply_to queue
         
         Args:
             reply_to: Queue name to send response to
             correlation_id: Correlation ID for matching request/response
-            agent_id: Agent identifier
+            model_id: Agent identifier
             success: Whether the launch was successful
             message: Status message
         """
@@ -223,7 +232,7 @@ class SignalingWorker:
             
             # Prepare response message
             response = {
-                'agent_id': agent_id,
+                'model_id': model_id,
                 'success': success,
                 'message': message,
                 'timestamp': str(threading.current_thread().name)
@@ -240,7 +249,7 @@ class SignalingWorker:
                 )
             )
             
-            logger.info(f"📤 Sent launch response to {reply_to} for agent: {agent_id}")
+            logger.info(f"📤 Sent launch response to {reply_to} for agent: {model_id}")
             
             # Close connection
             connection.close()
@@ -260,7 +269,7 @@ class SignalingWorker:
             
             # Extract metadata from request
             metadata_dataloader = {
-                'equity': request_data.get('entity_name'),
+                'equity': request_data.get('equity'),
                 'observation_horizon': request_data.get('observation_horizon'),
                 'prediction_horizon': request_data.get('prediction_horizon'),
                 'time_frequency': request_data.get('time_frequency'),
@@ -274,11 +283,11 @@ class SignalingWorker:
 
             # Create dataloader object
             logger.info("Creating dataloader...")
-            dataloader = SignalingDataLoader(metadata=metadata_dataloader,config=self.config)
+            dataloader = SignalingDataLoader(metadata=metadata_dataloader)
             
             # Create model object
             logger.info("Creating model...")
-            model = SignalingModelV1(self.config)
+            model = SignalingModelV2(self.config)
             
             # Create verification object
             logger.info("Creating verification...")
@@ -290,7 +299,8 @@ class SignalingWorker:
                 meta_data=request_data,
                 model=model,
                 dataloader=dataloader,
-                verification=verification
+                verification=verification,
+                stop_event=self.stop_event
             )
             
             # Call build_and_store to train and save the model
@@ -298,9 +308,9 @@ class SignalingWorker:
             success = agent.build_and_store()
             
             if success:
-                logger.info(f"✅ Successfully trained and stored model: {request_data['agent_id']}")
+                logger.info(f"✅ Successfully trained and stored model: {request_data['model_id']}")
             else:
-                logger.error(f"❌ Failed to train model: {request_data['agent_id']}")
+                logger.error(f"❌ Failed to train model: {request_data['model_id']}")
             
             return success
             
@@ -313,33 +323,33 @@ class SignalingWorker:
         Process a stop request for a specific agent
         
         Args:
-            request_data: Dictionary containing agent_id to stop
+            request_data: Dictionary containing model_id to stop
         
         Returns:
             bool: True if stop successful, False otherwise
         """
         try:
-            agent_id = request_data.get('agent_id')
-            logger.info(f"Processing stop request for agent: {agent_id}")
+            model_id = request_data.get('model_id')
+            logger.info(f"Processing stop request for agent: {model_id}")
             
             # Get agent from active agents (thread-safe)
             with self.agents_lock:
-                agent = self.active_agents.get(agent_id)
+                agent = self.active_agents.get(model_id)
                 if not agent:
-                    logger.warning(f"⚠️ Agent {agent_id} is not running")
+                    logger.warning(f"⚠️ Agent {model_id} is not running")
                     return False
             
             # Stop the agent
-            logger.info(f"Stopping agent: {agent_id}...")
-            agent.stop()
+            logger.info(f"Stopping agent: {model_id}...")
+            agent.set()
             
             # Remove from active agents (thread-safe)
             with self.agents_lock:
-                if agent_id in self.active_agents:
-                    del self.active_agents[agent_id]
-                    self.redis_client.srem(self.redis_dict_name, agent_id)
+                if model_id in self.active_agents:
+                    del self.active_agents[model_id]
+                    self.redis_client.srem(self.redis_dict_name, model_id)
             
-            logger.info(f"✅ Successfully stopped agent: {agent_id}")
+            logger.info(f"✅ Successfully stopped agent: {model_id}")
             logger.info(f"📊 Active agents: {len(self.active_agents)}")
             return True
             
@@ -357,17 +367,17 @@ class SignalingWorker:
         with self.agents_lock:
             return list(self.active_agents.keys())
     
-    def check_agent_status(self, agent_id):
+    def check_agent_status(self, model_id):
         """
         Check if a specific agent is active
         
         Args:
-            agent_id: Agent identifier to check
+            model_id: Agent identifier to check
         Returns:
             bool: True if agent is active, False otherwise
         """
         with self.agents_lock:
-            return agent_id in self.active_agents
+            return model_id in self.active_agents
     
     def _training_thread_wrapper(self, request_data, model_id):
         """
@@ -407,27 +417,27 @@ class SignalingWorker:
                 active_count = len(self.active_threads)
             logger.info(f"🧹 Thread cleaned up: {model_id}. Active threads: {active_count}")
     
-    def _launch_thread_wrapper(self, request_data, agent_id, reply_to=None, correlation_id=None):
+    def _launch_thread_wrapper(self, request_data, model_id, reply_to=None, correlation_id=None):
         """
         Wrapper to run launch in a separate thread
         
         Args:
             request_data: Dictionary containing launch request parameters
-            agent_id: Agent identifier for logging
+            model_id: Agent identifier for logging
             reply_to: Optional reply queue name for sending response
             correlation_id: Optional correlation ID for response matching
         """
         try:
-            logger.info(f"🧵 Thread started for launch: {agent_id}")
+            logger.info(f"🧵 Thread started for launch: {model_id}")
             success = self._process_launch_request(request_data, reply_to, correlation_id)
             
             if success:
-                logger.info(f"✅ Thread completed successfully: {agent_id}")
+                logger.info(f"✅ Thread completed successfully: {model_id}")
             else:
-                logger.error(f"❌ Thread failed: {agent_id}")
+                logger.error(f"❌ Thread failed: {model_id}")
                 
         except Exception as e:
-            logger.error(f"❌ Thread error for {agent_id}: {str(e)}")
+            logger.error(f"❌ Thread error for {model_id}: {str(e)}")
         finally:
             # Clean up thread from active list (thread-safe)
             current_thread = threading.current_thread()
@@ -435,7 +445,7 @@ class SignalingWorker:
                 if current_thread in self.active_launch_threads:
                     self.active_launch_threads.remove(current_thread)
                 active_count = len(self.active_launch_threads)
-            logger.info(f"🧹 Launch thread cleaned up: {agent_id}. Active launch threads: {active_count}")
+            logger.info(f"🧹 Launch thread cleaned up: {model_id}. Active launch threads: {active_count}")
     
     
     def _cleanup_finished_threads(self):
@@ -476,7 +486,7 @@ class SignalingWorker:
                 try:
                     # Parse the training request
                     request_data = json.loads(body)
-                    model_id = request_data.get('agent_id', 'unknown')
+                    model_id = request_data.get('model_id', 'unknown')
                     logger.info(f"📥 Received training request: {model_id}")
                     
                     # Clean up finished threads before checking limit
@@ -527,8 +537,8 @@ class SignalingWorker:
                 try:
                     # Parse the launch request
                     request_data = json.loads(body)
-                    agent_id = request_data.get('agent_id', 'unknown')
-                    logger.info(f"📥 Received launch request: {agent_id}")
+                    model_id = request_data.get('model_id', 'unknown')
+                    logger.info(f"📥 Received launch request: {model_id}")
                     
                     # Extract reply_to and correlation_id from properties
                     reply_to = properties.reply_to
@@ -543,15 +553,15 @@ class SignalingWorker:
                     
                     if active_count >= self.max_concurrent_launches:
                         logger.warning(f"⚠️ Max concurrent launches ({self.max_concurrent_launches}) reached. "
-                                     f"Rejecting request: {agent_id}")
+                                     f"Rejecting request: {model_id}")
                         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                         return
                     
                     # Create and start thread for processing
                     launch_thread = threading.Thread(
                         target=self._launch_thread_wrapper,
-                        args=(request_data, agent_id, reply_to, correlation_id),
-                        name=f"Launch-{agent_id}",
+                        args=(request_data, model_id, reply_to, correlation_id),
+                        name=f"Launch-{model_id}",
                         daemon=False  # Non-daemon for graceful shutdown
                     )
                     
@@ -565,9 +575,9 @@ class SignalingWorker:
                     
                     # Acknowledge message after thread starts successfully
                     ch.basic_ack(delivery_tag=method.delivery_tag)
-                    logger.info(f"✅ Launch message acknowledged: {agent_id}")
+                    logger.info(f"✅ Launch message acknowledged: {model_id}")
                     
-                    logger.info(f"🚀 Launch thread spawned for: {agent_id}. "
+                    logger.info(f"🚀 Launch thread spawned for: {model_id}. "
                               f"Active launch threads: {active_count}")
                     
                 except json.JSONDecodeError as e:
@@ -607,18 +617,25 @@ class SignalingWorker:
         except Exception as e:
             logger.error(f"❌ Worker error: {str(e)}")
         finally:
-            # Clear channel reference
-            with self.channel_lock:
-                self.channel = None
+            try:
+                # Clear channel reference
+                with self.channel_lock:
+                    self.channel = None
+                
+                if 'connection' in locals() and connection.is_open:
+                    connection.close()
+                    logger.info("🔌 RabbitMQ connection closed")
+            except Exception as e:
+                logger.warning(f"Error closing RabbitMQ connection: {str(e)}")
+            #Stop all agents and wait for threads to finish
             
-            if 'connection' in locals() and connection.is_open:
-                connection.close()
-                logger.info("🔌 RabbitMQ connection closed")
-    
+            self.stop()
+            # Ensure all log handlers flush before exit
+            logging.shutdown()
     def stop(self):
         """Stop the worker and wait for active threads to complete"""
         logger.info("Stopping worker...")
-        
+        self.stop_event.set()
         # Stop consuming from RabbitMQ
         with self.channel_lock:
             if self.channel and self.channel.is_open:
@@ -631,21 +648,21 @@ class SignalingWorker:
         # Stop all launched agents (thread-safe)
         with self.agents_lock:
             agents_to_stop = list(self.active_agents.values())
-            agent_ids = list(self.active_agents.keys())
+            model_ids = list(self.active_agents.keys())
         
         if agents_to_stop:
             logger.info(f"🛑 Stopping {len(agents_to_stop)} active agents...")
-            for agent_id, agent in zip(agent_ids, agents_to_stop):
+            for model_id, agent in zip(model_ids, agents_to_stop):
                 try:
-                    agent.stop()
-                    logger.info(f"✅ Stopped agent: {agent_id}")
+                    self.redis_client.srem(f'active_agents:signaling', model_id)  # --- IGNORE ---
+                    logger.info(f"✅ Stopped agent: {model_id}")
                 except Exception as e:
-                    logger.error(f"❌ Error stopping agent {agent_id}: {str(e)}")
+                    logger.error(f"❌ Error stopping agent {model_id}: {str(e)}")
             
             # Clear agents dictionary and Redis
             with self.agents_lock:
-                for agent_id in self.active_agents.keys():
-                    self.redis_client.srem(self.redis_dict_name, agent_id)
+                for model_id in self.active_agents.keys():
+                    self.redis_client.srem(self.redis_dict_name, model_id)
                 self.active_agents.clear()
         
         # Wait for active training threads to complete (thread-safe)
@@ -671,10 +688,19 @@ class SignalingWorker:
             logger.info("✅ All launch threads completed")
 
 
+def handle_shutdown(signum, frame):
+    logging.info("Worker shutting down")
+    logging.shutdown()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 # Convenience function to run worker
 def start_worker():
     """Start the signaling worker"""
+
     worker = SignalingWorker()
+
     worker.run()
 
 

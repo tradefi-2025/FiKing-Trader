@@ -4,7 +4,7 @@
 
   "request_schema": {
     "create": {
-      "entity_name": {
+      "entity": {
         "type": "string",
         "required": true,
         "description": "Identifier of the financial instrument or entity to model. Must match one of the entries defined in configs/entities.json."

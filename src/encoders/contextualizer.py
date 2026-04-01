@@ -29,7 +29,7 @@ class NaiveContextualizer:
             return self.kronos_service.encode_timeseries_batch(ts)
         
         elif not (ts is not None and len(ts)) and text is not None and len(text):
-            return torch.stack([self.flang_service.encode(t, pooling="cls").mean(dim=0) for t in text])
+            return self.flang_service.encode(text, pooling="cls")
         else:
             return torch.zeros((1, self.d_model * 2))  # Return a zero vector if no data is available
 
