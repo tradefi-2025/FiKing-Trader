@@ -1,14 +1,8 @@
 {
-  "folders": [
-    {
-      "path": "."
-    }
-  ],
-  "settings": {
-    "files.autoSave": "afterDelay",
-    "files.autoSaveDelay": 1000,
-    "files.hotExit": "onExitAndWindowClose",
-    "git.autofetch": true,
-    "terminal.integrated.cwd": "${workspaceFolder}"
-  }
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {}
 }

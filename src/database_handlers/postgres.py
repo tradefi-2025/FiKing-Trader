@@ -61,14 +61,25 @@ class   PostgreSQLService:
         """
         self.host = host or os.getenv('POSTGRES_HOST', 'localhost')
         self.port = port or int(os.getenv('POSTGRES_PORT', 5432))
-        self.database = database or os.getenv('POSTGRES_DB')
-        self.user = user or os.getenv('POSTGRES_USER')
+        self.database = database or os.getenv('POSTGRES_DB') or os.getenv('POSTGRES_DATABASE')
+        self.user = user or os.getenv('POSTGRES_USER') or os.getenv('POSTGRES_USERNAME')
         self.password = password or os.getenv('POSTGRES_PASSWORD')
         self.sslmode = sslmode or os.getenv('POSTGRES_SSLMODE', 'prefer')
-        
-        if not all([self.database, self.user, self.password]):
-            raise ValueError("Database name, user, and password are required. "
-                           "Set via environment variables or constructor parameters.")
+
+        missing: List[str] = []
+        if not self.database:
+            missing.append('POSTGRES_DB (or POSTGRES_DATABASE)')
+        if not self.user:
+            missing.append('POSTGRES_USER (or POSTGRES_USERNAME)')
+        if not self.password:
+            missing.append('POSTGRES_PASSWORD')
+
+        if missing:
+            raise ValueError(
+                "Missing required PostgreSQL settings: "
+                + ", ".join(missing)
+                + ". Set via environment variables or constructor parameters."
+            )
         
         self.connection_pool = None
         self._initialize_pool(min_connections, max_connections)
