@@ -24,6 +24,11 @@
         "required": true,
         "description": "Number of time steps ahead to forecast. The model predicts P_(t + prediction_horizon)."
       },
+      "change_percentage_threshold": {
+        "type": "float",
+        "required": false,
+        "description": "Minimum percentage change in the forecasted price compared to the current price required to trigger a trading signal. For example, a value of 0.02 means a 2% change is needed to emit a signal."
+      },
       "news_observation_horizon": {
         "type": "integer",
         "required": false,

@@ -11,7 +11,7 @@ import redis
 
 from .config import SignalingConfig
 from .dl import SignalingDataLoader
-from .model import SignalingModelV2
+from .model import SignalingModelV4
 from .verification import SignalingVerification
 from .agent import Agent
 from ...database_handlers.mongoDB import MongoDBService
@@ -147,7 +147,7 @@ class SignalingWorker:
             
             # Create model object and load weights
             logger.info("Creating model and loading weights...")
-            model = SignalingModelV2(self.config)
+            model = SignalingModelV4(self.config)
             model.load_state_dict(model_data['weights'])  # Load the trained weights
             model.eval()  # Set to evaluation mode
             
@@ -287,7 +287,7 @@ class SignalingWorker:
             
             # Create model object
             logger.info("Creating model...")
-            model = SignalingModelV2(self.config)
+            model = SignalingModelV4(self.config)
             
             # Create verification object
             logger.info("Creating verification...")

@@ -96,6 +96,7 @@ class MongoDBService:
         self.db = self.client[self.database_name]
 
         self._connect_and_init()
+        self.host=os.getenv("MONGO_HOST", "localhost")
 
     # -------------------------------------------------------------------------
     # Internal helpers
@@ -169,6 +170,19 @@ class MongoDBService:
         performance_metrics: Optional[Dict[str, float]] = None,
     ) -> bool:
         """Upsert serialized model weights for an agent."""
+        if self.host=="localhost":
+            try:
+                logger.warning("⚠️ You are saving agent weights to a local MongoDB instance. Make sure this is intentional.")
+                os.makedirs("data/models", exist_ok=True)
+                torch.save(weights, f"data/models/{model_id}_{version}.pt")
+                logger.info("✅ Saved weights for agent %s to local file", model_id)
+                return True
+            except Exception as exc:
+                logger.error("❌ Error saving agent weights locally: %s", exc)
+                if self.strict_errors:
+                    raise
+                return False
+
         try:
             buf = io.BytesIO()
             torch.save(weights, buf)
@@ -207,6 +221,25 @@ class MongoDBService:
 
     def get_agent_weights(self, model_id: str) -> Optional[Dict[str, Any]]:
         """Load agent model weights and metadata from the database."""
+        if self.host=="localhost":
+            logger.warning("⚠️ You are loading agent weights from a local MongoDB instance. Make sure this is intentional.")
+            try:
+                weights = torch.load(f"data/models/{model_id}_v1.pt", map_location=torch.device("cpu"))
+                return {
+                    "model_id": model_id,
+                    "agent_name": model_id.split("_")[0],
+                    "version": "v1",
+                    "weights": weights,
+                    "metadata": {},
+                    "equity": None,
+                    "performance_metrics": {},
+                    "training_date": None,
+                    "created_at": None,
+                    "updated_at": None,
+                }
+            except FileNotFoundError:
+                logger.error("❌ Local weights file not found for model_id: %s", model_id)
+                return None
         try:
             doc = self.db["agents_weights"].find_one({"model_id": model_id})
             if not doc:
