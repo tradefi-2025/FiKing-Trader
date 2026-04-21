@@ -15,7 +15,24 @@ from ...external_api.live import RefinitivService
 from ...external_api.news import FinnhubNewsCollector
 
 logger = logging.getLogger(__name__)
+class ContextWrapper:
+    def __init__(self, equity, ctxt, ts):
+        self.equity     = equity
+        self.timestamps = pd.to_datetime(ctxt["timestamps"], utc=True)  # always UTC-aware
+        self.ts         = ts
+        self.text_embd  = ctxt["embeddings"]
 
+    def get(self, from_, to_):
+        from_utc = pd.Timestamp(from_, tz="UTC")
+        to_utc   = pd.Timestamp(to_,   tz="UTC")
+
+        # ts index is tz-naive → strip tz for slicing
+        from_naive = from_utc.tz_localize(None)
+        to_naive   = to_utc.tz_localize(None)
+
+        mask = (self.timestamps >= from_utc) & (self.timestamps <= to_utc)
+        return torch.FloatTensor(self.ts.loc[from_naive:to_naive].values), self.text_embd[mask]
+        
 def gaussian_blur_1d(x: torch.Tensor, kernel_size: int = 5, sigma: float = 1.0) -> torch.Tensor:
     half = kernel_size // 2
     grid = torch.arange(-half, half + 1, dtype=torch.float32)
@@ -291,6 +308,8 @@ class SignalingDataLoader:
         # Y = ((close_col[pred_horizons]/close_col[end_indices]).log()*1e2).unsqueeze(-1)  # log return from last candle in window to prediction horizon candle
         end_timestamps = norm_df.index[end_indices.tolist()].tolist()
         return X, Y, end_timestamps
+    
+
     def _ensure_contextualizer_channel(self) -> None:
         if self._ctx_connection and self._ctx_connection.is_open:
             if self._ctx_channel and self._ctx_channel.is_open:
@@ -362,11 +381,14 @@ class SignalingDataLoader:
 
         return X, Y, end_timestamps
 
+    
     def fetch_news_embeddings_dataset(
         self,
         equity: str,
         prompt: str = "",
         resources: list | None = None,
+        from_: pd.Timestamp | None = None,
+        to_: pd.Timestamp | None = None,
     ) -> dict:
         """
         Fetch pre-computed news embeddings for this equity from MongoDB.
@@ -379,7 +401,7 @@ class SignalingDataLoader:
         # prompt and resources parameters are placeholders for a future
         # external retrieval / embedding pipeline.
         # return self.db.get_news_embeddings(equity=equity, start=None, end=None)
-        news=self.finnhub_collector.collect(entities=equity, start_date=None, end_date=None, fields=["Date", "Article"])
+        news=self.finnhub_collector.collect(entities=equity, start_date=from_, end_date=to_, fields=["Date", "Article"])
         list_articles = [r["Article"] for r in news]
         if not list_articles:
                 list_articles = [""]
@@ -573,6 +595,31 @@ class SignalingDataLoader:
         return train_loader, test_dataset,weights
     
 
+    def fetch_alliged_data(self,from_ , to_):
+        news = self.fetch_news_embeddings_dataset(
+            self.equity,
+            prompt=self.news_retrieval_prompt,
+            from_=from_,
+            to_=to_,
+        )
+        from_ = pd.Timestamp(from_)   # ← coerce str → Timestamp
+        to_   = pd.Timestamp(to_)
+
+        records = self.rd.get_ohlc_df_interval(
+            self.equity, interval=self.frequency, start=from_, end=to_
+        )
+
+        records=self.rd.get_ohlc_df_interval(self.equity, interval=self.frequency, start=from_, end=to_)
+        df = pd.DataFrame(records)[["timestamp", "open", "high", "low", "close", "volume"]]
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+            df[col] = (df[col] - df[col].mean()) / (df[col].std() + 1e-8)  # standardize each feature
+        df=df.set_index("timestamp").sort_index()
+
+        wrapper=ContextWrapper(self.equity, news, df)
+        return wrapper
+    
+
 
     def fetch_inference_data(self) -> torch.Tensor:
         """
@@ -688,6 +735,29 @@ def test_fetch_inference_data():
     loader = SignalingDataLoader(metadata)
     representation = loader.fetch_inference_data()
     print(f"Inference representation shape: {representation.shape}")
+
+def test_fetch_allinged_data():
+    metadata = {
+        "equity": "AAPL",
+        "time_frequency": "1min",
+        "observation_horizon": 1000,
+        "prediction_horizon": 240,
+        "news_observation_horizon": 1240,
+        "news_retrieval_prompt": "Fetch news articles related to {equity} in the last {news_observation_horizon} hours.",
+        "news_resources": ["finnhub"],
+    }
+    loader = SignalingDataLoader(metadata)
+    from_ = "2026-01-01"
+    to_ = "2026-01-07"
+    wrapper = loader.fetch_alliged_data(from_, to_)
+    res=wrapper.get("2026-01-01","2026-01-03")
+    print(f"Aligned data from {from_} to {to_}: {res[0]}" )
+    print(f"ContextWrapper equity: {wrapper.equity}")
+    print(f"ContextWrapper timestamps: {wrapper.timestamps[:5]}")
+    print(f"ContextWrapper ts shape: {wrapper.ts.shape}")
+    print(f"ContextWrapper text_embd shape: {wrapper.text_embd.shape}")
+
+
 if __name__ == "__main__":
     dl=SignalingDataLoader({
         "equity": "AAPL",
@@ -699,5 +769,6 @@ if __name__ == "__main__":
         "news_resources": ["finnhub"],
     })
     # dl.fetch_backtest_data()
-    test_fetch_dataloader()
+    # test_fetch_dataloader()
     # test_fetch_inference_data()
+    test_fetch_allinged_data()

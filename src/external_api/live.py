@@ -293,6 +293,47 @@ class RefinitivService:
         logger.warning("No OHLC data found for equity %s (interval=%s)", equity, interval)
         return None
 
+    def get_ohlc_df_interval(
+        self,
+        equity: str,
+        interval: str = "1d",
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch OHLCV for a given equity and interval, with optional start/end.
+
+        If start/end are not provided, defaults to the past year (or a heuristic
+        lookback based on the interval).
+
+        This is a more flexible version of get_past_year_ohlc that allows
+        custom date ranges.
+        """
+        if start is None or end is None:
+            end = datetime.utcnow()
+            days = self._default_lookback_days_for_interval(interval)
+            start = end - timedelta(days=days)
+        for suffix in [".O", ".N"]:
+            ric = equity + suffix
+            logger.info(
+                "Attempting to fetch %s from %s to %s with interval=%s",
+                ric,
+                start.isoformat(timespec="seconds"),
+                end.isoformat(timespec="seconds"),
+                interval,
+            )
+            df = self.get_ohlc_df(ric, start, end, interval=interval)
+            if df is not None and not df.empty:
+                logger.info(
+                    "✅ Successfully fetched %d rows for %s (interval=%s)",
+                    len(df),
+                    ric,
+                    interval,
+                )
+                return df
+        logger.warning("No OHLC data found for equity %s (interval=%s)", equity, interval)
+        return None
+
     # -------------------------------------------------------------------------
     # Bridge to MongoDB time-series service
     # -------------------------------------------------------------------------

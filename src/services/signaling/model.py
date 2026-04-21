@@ -8,7 +8,7 @@ from .config import SignalingConfig
 import matplotlib.pyplot as plt
 import torch.optim as optim
 from torch.optim.lr_scheduler import LinearLR
-
+from .s3_risk_management import *
 import logging
 import math
 
@@ -750,17 +750,91 @@ class SignalingModelV4(nn.Module):
                     all_pred=torch.cat([all_pred,pred.cpu()],dim=0)
                     all_target=torch.cat([all_target,target[i].cpu()],dim=0)
             
-    def inference(self, input_data, confidence_level):
+    def inference(
+        self,
+        input_data,
+        confidence_level: float,
+        # ── S3 risk parameters ──────────────────────────────
+        risk_method: str                    = "fixed_fractional",
+        account_value: float                = None,
+        entry_price: float                  = None,
+        risk_kwargs: dict                   = None,
+    ) -> dict:
+        """
+        Run forward pass, apply confidence gate, then compute position size via S3.
+
+        Args:
+            input_data:       Tuple of (ts, doc_emb, doc_mask) tensors.
+            confidence_level: Minimum probability to emit a signal.
+            risk_method:      One of 'fixed_fractional', 'kelly', 'cvar'.
+            account_value:    Total tradeable capital. Required for sizing.
+            entry_price:      Expected fill price. Required for sizing.
+            risk_kwargs:      Extra kwargs forwarded to the sizing function
+                            (e.g. atr, stop_loss_price, confidence for Kelly).
+        """
         self.eval()
+        risk_kwargs = risk_kwargs or {}
+
         with torch.no_grad():
-            pred, _ = self(*input_data)
-            probs=F.softmax(pred, dim=-1)
-            pred_label=probs.argmax(dim=-1)
-            res = {
-                "estimated action" : pred_label.squeeze().item()-1,
-                "probability"     : probs.max().item()
+            pred, _, _, _ = self(*input_data)          # (B, 3) logits
+            probs         = F.softmax(pred, dim=-1)    # (B, 3) probabilities
+            confidence    = probs.max().item()
+            pred_idx      = probs.argmax(dim=-1).squeeze().item()
+
+        signal = pred_idx - 1  # {0,1,2} → {-1, 0, 1}
+
+        # ── Confidence gate ─────────────────────────────────────────────────
+        if confidence < confidence_level or signal == 0:
+            return {
+                "estimated_action": "hold",
+                "signal":           0,
+                "probability":      round(confidence, 4),
+                "volume":    0.0,
+                "notional":         0.0,
+                "stop_loss_price":  None,
+                "risk_amount":      0.0,
+                "sizing_method":    None,
+                "warnings":         [],
             }
-        return res
+
+        # ── S3 Position Sizing ───────────────────────────────────────────────
+        direction = "BUY" if signal == 1 else "SELL"
+        risk_result = None
+        risk_warnings = []
+
+        if account_value is not None and entry_price is not None:
+            # For Kelly: inject model confidence as P(win) if not explicitly set
+            if risk_method == "kelly" and "confidence" not in risk_kwargs:
+                risk_kwargs["confidence"] = confidence
+
+            try:
+                risk_result = compute_position_size(
+                    method           = risk_method,
+                    account_value    = account_value,
+                    entry_price      = entry_price,
+                    signal_direction = direction,
+                    **risk_kwargs,
+                )
+                risk_warnings = risk_result.warnings
+            except Exception as e:
+                logger.warning(f"S3 sizing failed: {e}")
+
+        return {
+            "estimated_action": direction,
+            "signal":           signal,
+            "probability":      round(confidence, 4),
+            "probabilities": {
+                "sell": round(probs[0, 0].item(), 4),
+                "hold": round(probs[0, 1].item(), 4),
+                "buy":  round(probs[0, 2].item(), 4),
+            },
+            "volume":   round(risk_result.position_size, 4) if risk_result else None,
+            "notional":        round(risk_result.notional, 2)       if risk_result else None,
+            "stop_loss_price": round(risk_result.stop_loss_price, 4) if risk_result else None,
+            "risk_amount":     round(risk_result.risk_amount, 2)     if risk_result else None,
+            "sizing_method":   risk_result.sizing_method_used        if risk_result else None,
+            "warnings":        risk_warnings,
+        }
 
 
 
