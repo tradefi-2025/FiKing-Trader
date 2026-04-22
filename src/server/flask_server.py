@@ -64,65 +64,74 @@ def get_status():
         pass
 
 
+
+# ==================== Signalling Agent Poller (replaces /model/create) ====================
+
+from src.db.signalling_db_service import SignallingDBService
+import threading
+import time
+
+_db_service = SignallingDBService()
+
+def _poll_pending_agents(interval: int = 10):
+    """
+    Background thread: polls for PENDING agents, transitions them to INPROGRESS,
+    and enqueues them onto the service training queue.
+    Runs every `interval` seconds.
+    """
+    logger.info("Signalling agent poller started.")
+    while True:
+        try:
+            pending = _db_service.get_pending_agents()
+
+            if pending:
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost'))
+                )
+
+                for agent in pending:
+                    model_id = agent["model_id"]
+                    service  = agent.get("service", "signaling")
+                    queue    = f"{service}_training_queue"
+
+                    # Transition status first — prevents double-pickup on next poll
+                    updated = _db_service.mark_inprogress(model_id)
+                    if not updated:
+                        logger.warning(f"Could not mark {model_id} as INPROGRESS, skipping.")
+                        continue
+
+                    channel = connection.channel()
+                    channel.queue_declare(queue=queue, durable=True)
+                    channel.basic_publish(
+                        exchange='',
+                        routing_key=queue,
+                        body=json.dumps(agent),
+                        properties=pika.BasicProperties(delivery_mode=2),
+                    )
+                    logger.info(f"Enqueued agent {model_id} onto {queue}.")
+
+                connection.close()
+
+        except Exception as e:
+            logger.error(f"Poller error: {e}")
+
+        time.sleep(interval)
+
+
+# Start the poller as a daemon thread when the app module loads
+_poller_thread = threading.Thread(
+    target=_poll_pending_agents,
+    kwargs={"interval": int(os.getenv("AGENT_POLL_INTERVAL", 10))},
+    daemon=True,
+    name="signalling-agent-poller",
+)
+_poller_thread.start()
 # ==================== Model/Agent Management ====================
 
-@app.route('/model/create', methods=['POST'])
-def create_model():
-    """
-    Create and configure a forecasting model instance
-    
-    Request Body:
-        - entity: Financial instrument identifier
-        - time_frequency: Time resolution (1MIN, 5MIN, 1H, 1D, etc.)
-        - observation_horizon: Number of past time steps for input
-        - prediction_horizon: Number of time steps ahead to forecast
-        - news_observation_horizon: (optional) Time steps for news data
-        - news_retrieval_prompt: (optional) Natural language query for news
-        - news_resources: (optional) List of news sources
-        - confidence_level: (optional) Minimum confidence for signals
-        - signal_frequency: Frequency for signal evaluation
-    
-    Response:
-        - status: ACCEPTED or REJECTED
-        - valid: Boolean indicating validation result
-        - model_id: Unique identifier (if accepted)
-        - message: Detailed explanation
-        - input_summary: Human-readable configuration description*
-
-    """
-
-    body = request.get_json()
-    if verify(body) == False:
-        return jsonify({
-            'status': 'REJECTED',
-            'valid': False,
-            'message': 'Invalid request body. Please check the required fields and formats.',
-            'service': service
-        }), 400
-    service = body.get('service', 'unknown')
-    print(f"Received model creation request for service: {service} with body: {body}")
-    queue = f'{service}_training_queue'
-    pika_connection = pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBITMQ_HOST', 'localhost')))
-    channel = pika_connection.channel()
-    channel.queue_declare(queue=queue, durable=True)
-    channel.basic_publish(
-        exchange='',
-        routing_key=queue,
-        body=json.dumps(body),
-        properties=pika.BasicProperties(
-            delivery_mode=2,  # Make message persistent
-        )
-    )
-
-    return jsonify({
-        'status': 'ACCEPTED',
-        'valid': True,
-        'message': 'Model creation request accepted and queued for processing.'
-    }), 202
 
     
 
-@app.route('/model/start', methods=['POST'])
+@app.route('/lauch', methods=['POST'])
 def start_model( ):
 
     """
@@ -172,8 +181,8 @@ def start_model( ):
 
 
 
-@app.route('/model/<service>/<model_id>/stop', methods=['POST'])
-def stop_model(service, model_id):
+@app.route('/stop', methods=['POST'])
+def stop_model():
     """
     Stop a running model
     
@@ -187,86 +196,14 @@ def stop_model(service, model_id):
     pass
 
 
-@app.route('/model/<service>/<model_id>/status', methods=['GET'])
-def get_model_status(service, model_id):
-    """
-    Get status of a specific model
-    
-    Path Parameters:
-        - model_id: Unique model identifier
-    
-    Response:
-        - model_id: Model identifier
-        - status: Current status (training, running, stopped, etc.)
-        - is_trained: Boolean
-        - is_running: Boolean
-        - equity: Associated equity symbol
-        - created_at: Creation timestamp
-        - last_prediction_at: Last prediction timestamp
-        - performance_metrics: Training/evaluation metrics
-    """
-    pass
-
-
-@app.route('/model/<service>/<model_id>', methods=['DELETE'])
-def delete_model(service, model_id):
-    """
-    Delete a model and its associated data
-    
-    Path Parameters:
-        - model_id: Unique model identifier
-    
-    Response:
-        - status: SUCCESS or FAILURE
-        - message: Result description
-    """
-    pass
-
-
-@app.route('/models', methods=['GET'])
-def list_models():
-    """
-    List all models
-    
-    Query Parameters:
-        - equity: (optional) Filter by equity symbol
-        - status: (optional) Filter by status
-        - limit: (optional) Maximum number of results
-        - offset: (optional) Pagination offset
-    
-    Response:
-        - models: List of model objects
-        - total: Total number of models
-    """
-    pass
-
 
 # ==================== Inference/Prediction ====================
 
-@app.route('/model/<service>/predict', methods=['POST'])
-def predict(service, model_id):
-    """
-    Request on-demand prediction from a model
-    
-    Path Parameters:
-        - model_id: Unique model identifier
-    
-    Request Body:
-        - input_data: Features for prediction
-        - confidence_level: (optional) Confidence threshold
-    
-    Response:
-        - prediction: Model prediction result
-        - confidence: Prediction confidence
-        - timestamp: Prediction timestamp
-    """
-    
-            
-    pass
 
 
-@app.route('/model/<service>/<model_id>/signals', methods=['POST'])
-def get_signals(service, model_id):
+
+@app.route('/signal', methods=['POST'])
+def get_signals():
     """
     Get recent trading signals from a model
     
@@ -290,7 +227,8 @@ def get_signals(service, model_id):
         }), 503
     
     body = request.get_json() or {}
-    
+    service=body.get('service')
+    model_id = body.get('model_id')
     if redis_client.sismember(f'active_agents:{service}', model_id):
         connection = None
         try:
@@ -540,7 +478,15 @@ def run_server(host='0.0.0.0', port=5000, debug=False):
         debug: Debug mode flag
     """
     logger.info(f"Starting Flask server on {host}:{port}")
+    _poller_thread = threading.Thread(
+        target=_poll_pending_agents,
+        kwargs={"interval": int(os.getenv("AGENT_POLL_INTERVAL", 10))},
+        daemon=True,
+        name="signalling-agent-poller",
+    )
+    _poller_thread.start()
     app.run(host=host, port=port, debug=debug)
+    
 
 
 if __name__ == '__main__':
