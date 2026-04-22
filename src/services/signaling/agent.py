@@ -340,8 +340,6 @@ class Agent:
             )
 
     def main_loop(self):
-        backtest_data = self.dl.fetch_backtest_data()
-        self.model.test(backtest_data)
         freq             = self.meta_data.get('signal_frequency', self.config.default_frequency)
         confidence_level = self.meta_data.get('confidence_level', self.config.default_confidence_level)
 

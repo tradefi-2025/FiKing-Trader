@@ -1,14 +1,27 @@
 {
-  "endpoint": "POST /model/create",
   "description": "Creates and configures a forecasting model instance with optional news and sentiment integration. The model is trained asynchronously based on user-defined market parameters and deployed for automated signal generation.",
 
   "request_schema": {
     "create": {
-      "entity": {
+      "service":
+      {
+        "type": "string",
+        "required": true,
+        "description": "Name of the service to create. Must be 'signaling' for this endpoint."
+      },
+
+      "equity": {
         "type": "string",
         "required": true,
         "description": "Identifier of the financial instrument or entity to model. Must match one of the entries defined in configs/entities.json."
       },
+      "model_id":
+      {
+        "type" : "string",
+        "required": true,
+        "description": "Unique identifier for the model instance. Must be a non-empty string and unique across all models."
+      },
+
       "time_frequency": {
         "type": "string",
         "required": true,
@@ -53,9 +66,15 @@
         "type": "integer",
         "required": true,
         "description": "Frequency (in time steps) at which the model evaluates whether to generate a signal."
-      }
+      },
+      "status":
+      {
+        "type": "string",
+        "required": true,
+        "description": "The status order is as follows : PENDING->INPROGRESS->FAILED|CREATED->INACTIVE->ACTIVE"
     }
   },
+//Note That there will be changes in this contract, some features will be added and some will be removed, the final contract will be shared after the development is done.
 
   "response_schema": {
     "status": {
