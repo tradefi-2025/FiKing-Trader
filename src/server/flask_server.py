@@ -67,7 +67,7 @@ def get_status():
 
 # ==================== Signalling Agent Poller (replaces /model/create) ====================
 
-from src.db.signalling_db_service import SignallingDBService
+from src.database_handlers.signalling_db import SignallingDBService
 import threading
 import time
 
