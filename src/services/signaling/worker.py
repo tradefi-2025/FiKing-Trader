@@ -15,7 +15,7 @@ from .model import SignalingModelV4
 from .verification import SignalingVerification
 from .agent import Agent
 from ...database_handlers.mongoDB import MongoDBService
-
+from ...database_handlers.postgres import DatabaseClient
 load_env()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -67,6 +67,8 @@ class SignalingWorker:
         # Channel reference for graceful shutdown
         self.channel = None
         self.channel_lock = threading.Lock()
+
+        self.db=DatabaseClient()
     
     def _get_rabbitmq_connection(self):
         """Create RabbitMQ connection"""
@@ -309,8 +311,10 @@ class SignalingWorker:
             
             if success:
                 logger.info(f"✅ Successfully trained and stored model: {request_data['model_id']}")
+                self.db.mark_agent_created(request_data['model_id'])
             else:
                 logger.error(f"❌ Failed to train model: {request_data['model_id']}")
+                self.db.mark_agent_failed(request_data['model_id'])
             
             return success
             

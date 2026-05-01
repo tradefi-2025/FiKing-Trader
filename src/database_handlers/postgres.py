@@ -1,784 +1,912 @@
-"""
-PostgreSQL Database Handler - Generic Service
-Provides basic database operations with JSON data handling
+from __future__ import annotations
 
-This service is intentionally generic and does not manipulate data.
-Each service should define its own table structure and handle data transformation.
-
-Environment Variables Required:
-- POSTGRES_HOST: Database host (default: localhost)
-- POSTGRES_PORT: Database port (default: 5432)
-- POSTGRES_DB: Database name
-- POSTGRES_USER: Database user
-- POSTGRES_PASSWORD: Database password
-- POSTGRES_SSLMODE: SSL mode (default: prefer)
-"""
-
-import os
-import logging
 import json
-from typing import Dict, List, Optional, Any, Union, Tuple
-from datetime import datetime, date
-from decimal import Decimal
-import psycopg2
-from psycopg2 import pool, sql, extras
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+import logging
+import os
+import time
 from contextlib import contextmanager
+from typing import Any, Dict, Generator, Iterable, List, Optional
+
+import psycopg2
+import psycopg2.extras
+from psycopg2.extras import Json, RealDictCursor
+
 from src.utils.env import load_env
 
-# Load environment variables
 load_env()
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+SIGNAL_STATUS_VALUES = {"NEW", "READ", "ARCHIVED"}
+AGENT_STATUS_VALUES = {
+"PENDING",
+"IN_PROGRESS",
+"COMPLETED",
+"FAILED",
+"CANCELLED",
+"ACTIVE",
+"INACTIVE",
+"CREATED",
+}
+class DatabaseClient:
+    """Generic communication layer for a remote PostgreSQL database using env vars."""
 
-class   PostgreSQLService:
-    """Generic PostgreSQL database service for basic operations"""
     
-    def __init__(self, 
-                 host: str = None,
-                 port: int = None,
-                 database: str = None,
-                 user: str = None,
-                 password: str = None,
-                 sslmode: str = None,
-                 min_connections: int = 1,
-                 max_connections: int = 10):
-        """
-        Initialize PostgreSQL service with connection pooling
-        
-        Args:
-            host: Database host (loads from POSTGRES_HOST if not provided)
-            port: Database port (loads from POSTGRES_PORT if not provided)
-            database: Database name (loads from POSTGRES_DB if not provided)
-            user: Database user (loads from POSTGRES_USER if not provided)
-            password: Database password (loads from POSTGRES_PASSWORD if not provided)
-            sslmode: SSL mode (loads from POSTGRES_SSLMODE if not provided)
-            min_connections: Minimum connections in pool
-            max_connections: Maximum connections in pool
-        """
-        self.host = host or os.getenv('POSTGRES_HOST', 'localhost')
-        self.port = port or int(os.getenv('POSTGRES_PORT', 5432))
-        self.database = database or os.getenv('POSTGRES_DB')
-        self.user = user or os.getenv('POSTGRES_USER')
-        self.password = password or os.getenv('POSTGRES_PASSWORD')
-        self.sslmode = sslmode or os.getenv('POSTGRES_SSLMODE', 'prefer')
-        
-        if not all([self.database, self.user, self.password]):
-            raise ValueError("Database name, user, and password are required. "
-                           "Set via environment variables or constructor parameters.")
-        
-        self.connection_pool = None
-        self._initialize_pool(min_connections, max_connections)
-    
-    def _initialize_pool(self, min_conn: int, max_conn: int):
-        """Initialize connection pool"""
-        try:
-            self.connection_pool = psycopg2.pool.ThreadedConnectionPool(
-                min_conn,
-                max_conn,
-                host=self.host,
-                port=self.port,
-                database=self.database,
-                user=self.user,
-                password=self.password,
-                sslmode=self.sslmode
-            )
-            logger.info(f"✅ Connected to PostgreSQL: {self.database}@{self.host}")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize connection pool: {str(e)}")
-            raise
-    
+
+    def __init__(self) -> None:
+        self.host = self._get_env("POSTGRES_HOST")
+        self.port = int(os.getenv("POSTGRES_PORT", "5432"))
+        self.name = os.getenv("POSTGRES_DB", "postgres")
+        self.user = self._get_env("POSTGRES_USER")
+        self.password = self._get_env("POSTGRES_PASSWORD")
+        self.sslmode = os.getenv("POSTGRES_SSLMODE", "prefer")
+
+    def _get_env(self, key: str) -> str:
+        value = os.getenv(key)
+        if not value:
+            raise ValueError(f"Missing required environment variable: {key}")
+        return value
+
     @contextmanager
-    def get_connection(self):
-        """
-        Context manager for getting database connection from pool
-        
-        Usage:
-            with service.get_connection() as conn:
-                # use connection
-        """
-        conn = None
+    def connection(self) -> Generator[psycopg2.extensions.connection, None, None]:
+        conn = psycopg2.connect(
+            host=self.host,
+            port=self.port,
+            dbname=self.name,
+            user=self.user,
+            password=self.password,
+            sslmode=self.sslmode,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+        )
         try:
-            conn = self.connection_pool.getconn()
             yield conn
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            logger.error(f"❌ Connection error: {str(e)}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
             raise
         finally:
-            if conn:
-                self.connection_pool.putconn(conn)
+            conn.close()
+
+    def update_agent_status(self, agent_id: int, status: str) -> Optional[Dict[str, Any]]:
+        normalized_status = (status or "").strip().upper()
+        if normalized_status not in self.AGENT_STATUS_VALUES:
+            raise ValueError(f"Invalid agent status: {status}")
+
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE public.agent
+                    SET training_status = %s
+                    WHERE agent_id = %s
+                    RETURNING agent_id, name, training_status, version, user_id
+                    """,
+                    (normalized_status, agent_id),
+                )
+                row = cur.fetchone()
+
+        return dict(row) if row else None
     
-    @contextmanager
-    def get_cursor(self, commit: bool = True):
-        """
-        Context manager for getting cursor
+    def mark_agent_pending(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "PENDING")
+
+    def mark_agent_inprogress(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "IN_PROGRESS")
+
+    def mark_agent_completed(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "COMPLETED")
+
+    def mark_agent_created(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "CREATED")
+    
+    def mark_agent_failed(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "FAILED")
+    
+    def mark_agent_failed(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "FAILED")
+
+    def mark_agent_cancelled(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "CANCELLED")
+
+    def mark_agent_active(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "ACTIVE")
+    
+    def mark_agent_inactive(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        return self.update_agent_status(agent_id, "INACTIVE")
+
         
-        Args:
-            commit: Whether to commit transaction automatically
-            
-        Usage:
-            with service.get_cursor() as cursor:
-                cursor.execute("SELECT * FROM table")
-        """
-        with self.get_connection() as conn:
-            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+    def get_agent(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT agent_id, name, training_status, version, user_id
+                FROM public.agent
+                WHERE agent_id = %s
+                """,
+                (agent_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_agent_parameters(self, agent_id: int) -> Dict[str, Any]:
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    a.agent_id AS agent_id,
+                    a.name AS agent_name,
+                    a.training_status,
+                    a.version,
+                    a.user_id,
+                    f.id AS feature_id,
+                    f.name AS feature_name,
+                    f.description AS feature_description,
+                    pd.parameter_definition_id AS parameter_definition_id,
+                    pd.name AS parameter_name,
+                    pd.type AS parameter_type,
+                    pd.default_value,
+                    pd.required,
+                    pd.enum_values,
+                    pd.file_name,
+                    pv.value AS parameter_value
+                FROM public.agent a
+                LEFT JOIN public.agent_feature af
+                    ON af.agent_id = a.agent_id
+                LEFT JOIN public.feature f
+                    ON f.id = af.feature_id
+                LEFT JOIN public.parameter_value pv
+                    ON pv.agent_feature_id = af.agent_feature_id
+                LEFT JOIN public.parameter_definition pd
+                    ON pd.parameter_definition_id = pv.parameter_definition_id
+                WHERE a.agent_id = %s
+                ORDER BY af.feature_id, pd.parameter_definition_id
+                """,
+                (agent_id,),
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            raise ValueError(f"Agent {agent_id} not found")
+
+        first = rows[0]
+        result: Dict[str, Any] = {
+            "agent_id": str(first["agent_id"]),
+            "name": first.get("agent_name"),
+            "training_status": first.get("training_status"),
+            "version": first.get("version"),
+            "user_id": first.get("user_id"),
+            "features": [],
+            "parameters": {},
+        }
+
+        feature_map: Dict[Any, Dict[str, Any]] = {}
+
+        for row in rows:
+            feature_id = row.get("feature_id")
+            feature_name = row.get("feature_name")
+            parameter_name = row.get("parameter_name")
+
+            if feature_id is not None and feature_id not in feature_map:
+                feature_entry = {
+                    "id": feature_id,
+                    "name": feature_name,
+                    "description": row.get("feature_description"),
+                    "parameters": {},
+                }
+                feature_map[feature_id] = feature_entry
+                result["features"].append(feature_entry)
+
+            if not parameter_name:
+                continue
+
+            typed_value = self._coerce_parameter_value(
+                value=row.get("parameter_value"),
+                default_value=row.get("default_value"),
+                parameter_type=row.get("parameter_type"),
+                enum_values=row.get("enum_values"),
+            )
+
+            parameter_entry = {
+                "value": typed_value,
+                "type": row.get("parameter_type"),
+                "required": bool(row.get("required")) if row.get("required") is not None else False,
+                "default_value": row.get("default_value"),
+                "enum_values": self._parse_enum_values(row.get("enum_values")),
+                "file_name": row.get("file_name"),
+                "feature": feature_name,
+            }
+
+            result["parameters"][parameter_name] = parameter_entry
+
+            if feature_id is not None:
+                feature_map[feature_id]["parameters"][parameter_name] = parameter_entry
+
+        return result
+
+    def build_service_payload(self, agent_id: int, service_name: Optional[str] = None) -> Dict[str, Any]:
+        agent_data = self.get_agent_parameters(agent_id)
+        payload: Dict[str, Any] = {
+            "service": service_name or self._infer_service_name(agent_data),
+            "agent_id": agent_data["agent_id"],
+            "status": self._normalize_status(agent_data.get("training_status")),
+        }
+
+        for parameter_name, metadata in agent_data["parameters"].items():
+            payload[parameter_name] = metadata["value"]
+
+        return payload
+
+    def build_service_payload_json(self, agent_id: int, service_name: Optional[str] = None) -> str:
+        return json.dumps(self.build_service_payload(agent_id, service_name), ensure_ascii=False, indent=2)
+
+    def build_launch_payload(self, agent_id: int, service_name: str) -> Dict[str, str]:
+        return {
+            "service": service_name,
+            "agent_id": str(agent_id),
+        }
+
+    def build_signal_payload(self, agent_id: int, service_name: str) -> Dict[str, str]:
+        return {
+            "service": service_name,
+            "agent_id": str(agent_id),
+        }
+
+    def get_pending_agents(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT agent_id, name, training_status, version, user_id
+                FROM public.agent
+                WHERE UPPER(REPLACE(training_status, '_', '')) = 'PENDING'
+                ORDER BY agent_id ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return list(cur.fetchall())
+
+    def watch_pending_requests(self, poll_interval: float = 2.0, batch_size: int = 50) -> Iterable[List[Dict[str, Any]]]:
+        while True:
+            pending = self.get_pending_agents(limit=batch_size)
+            if pending:
+                yield pending
+            time.sleep(poll_interval)
+
+    def build_flat_metadata(self, agent_id: int, service_name: Optional[str] = None) -> Dict[str, Any]:
+        agent_data = self.get_agent_parameters(agent_id)
+
+        inferred_service = service_name or self._infer_service_name(agent_data)
+        request: Dict[str, Any] = {
+            "model_id": str(agent_data["agent_id"]),
+            "agent_id": str(agent_data["agent_id"]),
+            "service": inferred_service,
+            "agent_name": agent_data.get("name"),
+        }
+
+        for parameter_name, metadata in agent_data.get("parameters", {}).items():
+            request[parameter_name] = metadata.get("value")
+
+        if "status" not in request:
+            request["status"] = self._normalize_status(agent_data.get("training_status"))
+
+        return request
+
+    @staticmethod
+    def _infer_service_name(agent_data: Dict[str, Any]) -> str:
+        features = agent_data.get("features", [])
+        if features:
+            first_feature_name = features[0].get("name")
+            if first_feature_name:
+                return str(first_feature_name).lower()
+        return "unknown"
+
+    @staticmethod
+    def _normalize_status(status: Optional[str]) -> Optional[str]:
+        if status is None:
+            return None
+        normalized = str(status).replace("_", "").upper()
+        if normalized == "COMPLETED":
+            return "CREATED"
+        return normalized
+
+    def _coerce_parameter_value(
+        self,
+        value: Any,
+        default_value: Any,
+        parameter_type: Optional[str],
+        enum_values: Any,
+    ) -> Any:
+        raw = value if value not in (None, "") else default_value
+        if raw is None:
+            return None
+
+        kind = (parameter_type or "STRING").upper()
+        text = str(raw).strip()
+
+        if kind == "INTEGER":
+            return int(float(text))
+        if kind == "DOUBLE":
+            return float(text)
+        if kind == "BOOLEAN":
+            return text.lower() in {"1", "true", "yes", "y", "on"}
+        if kind == "DATE":
+            return text
+        if kind == "ENUM":
+            valid = self._parse_enum_values(enum_values)
+            if valid and text not in valid:
+                raise ValueError(f"Invalid enum value '{text}', expected one of {valid}")
+            return text
+        if kind == "FILE":
+            return text
+
+        parsed = self._try_parse_json(text)
+        if parsed is not None:
+            return parsed
+        if "," in text:
+            parts = [item.strip() for item in text.split(",") if item.strip()]
+            if len(parts) > 1:
+                return parts
+        return text
+
+    @staticmethod
+    def _parse_enum_values(enum_values: Any) -> List[str]:
+        if enum_values in (None, ""):
+            return []
+        if isinstance(enum_values, list):
+            return [str(item) for item in enum_values]
+        text = str(enum_values).strip()
+        if text.startswith("["):
             try:
-                yield cursor
+                data = json.loads(text)
+                if isinstance(data, list):
+                    return [str(item) for item in data]
+            except json.JSONDecodeError:
+                pass
+        return [item.strip() for item in text.split(",") if item.strip()]
+
+    @staticmethod
+    def _try_parse_json(text: str) -> Any:
+        if not text:
+            return None
+        if not ((text.startswith("[") and text.endswith("]")) or (text.startswith("{") and text.endswith("}"))):
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    def create_agent_with_parameters(
+        self,
+        *,
+        user_id: int,
+        agent_name: str,
+        training_status: str,
+        version: Optional[str],
+        feature_name: str,
+        feature_description: Optional[str],
+        parameters: Dict[str, Dict[str, Any]],
+    ) -> int:
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.agent (name, training_status, version, user_id)
+                VALUES (%s, %s, %s, %s)
+                RETURNING agent_id
+                """,
+                (agent_name, training_status, version, user_id),
+            )
+            agent_id = cur.fetchone()["agent_id"]
+
+            cur.execute(
+                """
+                INSERT INTO public.feature (name, description)
+                VALUES (%s, %s)
+                ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
+                RETURNING id
+                """,
+                (feature_name, feature_description),
+            )
+            feature_id = cur.fetchone()["id"]
+
+            cur.execute(
+                """
+                INSERT INTO public.agent_feature (agent_id, feature_id)
+                VALUES (%s, %s)
+                RETURNING agent_feature_id
+                """,
+                (agent_id, feature_id),
+            )
+            agent_feature_id = cur.fetchone()["agent_feature_id"]
+
+            for parameter_name, metadata in parameters.items():
+                parameter_type = metadata.get("type", "STRING")
+                default_value = self._serialize_value(metadata.get("default_value"))
+                required = bool(metadata.get("required", False))
+                enum_values = self._serialize_value(metadata.get("enum_values"))
+                file_name = metadata.get("file_name")
+                description = metadata.get("description")
+                value = self._serialize_value(metadata.get("value"))
+                min_value = self._serialize_value(metadata.get("min_value"))
+                max_value = self._serialize_value(metadata.get("max_value"))
+
+                cur.execute(
+                    """
+                    INSERT INTO public.parameter_definition (
+                        name, default_value, description, min_value, max_value,
+                        type, enum_values, file_name, required, feature_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING parameter_definition_id
+                    """,
+                    (
+                        parameter_name,
+                        default_value,
+                        description,
+                        min_value,
+                        max_value,
+                        parameter_type,
+                        enum_values,
+                        file_name,
+                        required,
+                        feature_id,
+                    ),
+                )
+                parameter_definition_id = cur.fetchone()["parameter_definition_id"]
+
+                cur.execute(
+                    """
+                    INSERT INTO public.parameter_value (value, agent_feature_id, parameter_definition_id)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (value, agent_feature_id, parameter_definition_id),
+                )
+
+            return int(agent_id)
+
+    @staticmethod
+    def _serialize_value(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    def _normalize_signal_row(self, row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not row:
+            return row
+
+        probabilities = row.get("probabilities") or {}
+        warnings = row.get("warnings") or []
+
+        return {
+            "signalId": row["signal_id"],
+            "agentId": row["agent_id"],
+            "agentName": row.get("agent_name"),
+            "signalDate": row["signal_date"].isoformat() if row.get("signal_date") else None,
+            "estimatedAction": row.get("estimated_action"),
+            "signal": row.get("signal"),
+            "probability": row.get("probability"),
+            "probabilities": probabilities,
+            "volume": row.get("volume"),
+            "notional": row.get("notional"),
+            "stopLossPrice": row.get("stop_loss_price"),
+            "riskAmount": row.get("risk_amount"),
+            "sizingMethod": row.get("sizing_method"),
+            "warnings": warnings,
+            "status": row.get("status"),
+        }
+
+    def create_signal(
+        self,
+        agent_id: int,
+        signal_date,
+        estimated_action: str,
+        signal: str,
+        probability: float,
+        probabilities: Dict[str, Any],
+        volume: Optional[float] = None,
+        notional: Optional[float] = None,
+        stop_loss_price: Optional[float] = None,
+        risk_amount: Optional[float] = None,
+        sizing_method: Optional[str] = None,
+        warnings: Optional[List[str]] = None,
+        status: str = "NEW",
+    ) -> Dict[str, Any]:
+        status = (status or "NEW").upper()
+        if status not in self.SIGNAL_STATUS_VALUES:
+            raise ValueError(f"Invalid signal status: {status}")
+
+        warnings = warnings or []
+        probabilities = probabilities or {}
+
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.signal (
+                        agent_id,
+                        signal_date,
+                        estimated_action,
+                        signal,
+                        probability,
+                        probabilities,
+                        volume,
+                        notional,
+                        stop_loss_price,
+                        risk_amount,
+                        sizing_method,
+                        warnings,
+                        status
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    RETURNING
+                        signal_id,
+                        agent_id,
+                        signal_date,
+                        estimated_action,
+                        signal,
+                        probability,
+                        probabilities,
+                        volume,
+                        notional,
+                        stop_loss_price,
+                        risk_amount,
+                        sizing_method,
+                        warnings,
+                        status
+                    """,
+                    (
+                        agent_id,
+                        signal_date,
+                        estimated_action,
+                        signal,
+                        probability,
+                        Json(probabilities),
+                        volume,
+                        notional,
+                        stop_loss_price,
+                        risk_amount,
+                        sizing_method,
+                        warnings,
+                        status,
+                    ),
+                )
+                row = cur.fetchone()
+
+                cur.execute(
+                    """
+                    SELECT a.name AS agent_name
+                    FROM public.agent a
+                    WHERE a.agent_id = %s
+                    """,
+                    (agent_id,),
+                )
+                agent_row = cur.fetchone()
+                row["agent_name"] = agent_row["agent_name"] if agent_row else None
+
+        return self._normalize_signal_row(row)
+
+    def get_user_signals(self, user_id: int) -> List[Dict[str, Any]]:
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        s.signal_id,
+                        s.agent_id,
+                        a.name AS agent_name,
+                        s.signal_date,
+                        s.estimated_action,
+                        s.signal,
+                        s.probability,
+                        s.probabilities,
+                        s.volume,
+                        s.notional,
+                        s.stop_loss_price,
+                        s.risk_amount,
+                        s.sizing_method,
+                        s.warnings,
+                        s.status
+                    FROM public.signal s
+                    JOIN public.agent a
+                      ON a.agent_id = s.agent_id
+                    WHERE a.user_id = %s
+                    ORDER BY s.signal_date DESC, s.signal_id DESC
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+
+        return [self._normalize_signal_row(row) for row in rows]
+
+    def update_signal_status(
+        self,
+        user_id: int,
+        signal_id: int,
+        status: str,
+    ) -> Optional[Dict[str, Any]]:
+        status = (status or "").upper()
+        if status not in self.SIGNAL_STATUS_VALUES:
+            raise ValueError(f"Invalid signal status: {status}")
+
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE public.signal s
+                    SET status = %s
+                    FROM public.agent a
+                    WHERE s.agent_id = a.agent_id
+                      AND s.signal_id = %s
+                      AND a.user_id = %s
+                    RETURNING
+                        s.signal_id,
+                        s.agent_id,
+                        a.name AS agent_name,
+                        s.signal_date,
+                        s.estimated_action,
+                        s.signal,
+                        s.probability,
+                        s.probabilities,
+                        s.volume,
+                        s.notional,
+                        s.stop_loss_price,
+                        s.risk_amount,
+                        s.sizing_method,
+                        s.warnings,
+                        s.status
+                    """,
+                    (status, signal_id, user_id),
+                )
+                row = cur.fetchone()
+
+        return self._normalize_signal_row(row) if row else None
+
+    def delete_signal(self, user_id: int, signal_id: int) -> bool:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM public.signal s
+                    USING public.agent a
+                    WHERE s.agent_id = a.agent_id
+                      AND s.signal_id = %s
+                      AND a.user_id = %s
+                    """,
+                    (signal_id, user_id),
+                )
+                deleted = cur.rowcount > 0
+
+        return deleted
+
+    def get_signal_by_id(self, user_id: int, signal_id: int) -> Optional[Dict[str, Any]]:
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        s.signal_id,
+                        s.agent_id,
+                        a.name AS agent_name,
+                        s.signal_date,
+                        s.estimated_action,
+                        s.signal,
+                        s.probability,
+                        s.probabilities,
+                        s.volume,
+                        s.notional,
+                        s.stop_loss_price,
+                        s.risk_amount,
+                        s.sizing_method,
+                        s.warnings,
+                        s.status
+                    FROM public.signal s
+                    JOIN public.agent a
+                      ON a.agent_id = s.agent_id
+                    WHERE s.signal_id = %s
+                      AND a.user_id = %s
+                    """,
+                    (signal_id, user_id),
+                )
+                row = cur.fetchone()
+
+        return self._normalize_signal_row(row) if row else None
+
+    def agent_belongs_to_user(self, agent_id: int, user_id: int) -> bool:
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM public.agent
+                    WHERE agent_id = %s
+                      AND user_id = %s
+                    """,
+                    (agent_id, user_id),
+                )
+                return cur.fetchone() is not None
+
+    def build_flat_metadata_for_user(self, agent_id: int, user_id: int):
+        if not self.agent_belongs_to_user(agent_id, user_id):
+            return None
+        return self.build_flat_metadata(agent_id)
+
+    def list_existing_tables(self, schema: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if schema:
+                    cur.execute(
+                        """
+                        SELECT table_schema, table_name
+                        FROM information_schema.tables
+                        WHERE table_type = 'BASE TABLE'
+                          AND table_schema = %s
+                        ORDER BY table_schema, table_name
+                        """,
+                        (schema,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT table_schema, table_name
+                        FROM information_schema.tables
+                        WHERE table_type = 'BASE TABLE'
+                          AND table_schema NOT IN ('pg_catalog', 'information_schema')
+                        ORDER BY table_schema, table_name
+                        """
+                    )
+
+                return [dict(row) for row in cur.fetchall()]
+
+    def debug_query(
+        self,
+        query: str,
+        params: Optional[Iterable[Any]] = None,
+        *,
+        fetch: bool = True,
+        commit: bool = False,
+    ) -> Dict[str, Any]:
+        query_clean = (query or "").strip()
+        if not query_clean:
+            raise ValueError("Query must not be empty.")
+
+        with self.connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query_clean, tuple(params) if params is not None else None)
+
+                columns = [desc.name for desc in cur.description] if cur.description else []
+                rows = [dict(row) for row in cur.fetchall()] if fetch and cur.description else []
+
+                result = {
+                    "ok": True,
+                    "query": query_clean,
+                    "params": list(params) if params is not None else [],
+                    "columns": columns,
+                    "rows": rows,
+                    "rowcount": cur.rowcount,
+                }
+
                 if commit:
                     conn.commit()
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"❌ Query error: {str(e)}")
-                raise
-            finally:
-                cursor.close()
-    
-    # ==================== Generic Query Methods ====================
-    
-    def execute_query(self, 
-                     query: str, 
-                     params: Union[tuple, dict] = None,
-                     commit: bool = True) -> bool:
-        """
-        Execute a SQL query (INSERT, UPDATE, DELETE, CREATE, etc.)
-        
-        Args:
-            query: SQL query string
-            params: Query parameters (tuple or dict)
-            commit: Whether to commit the transaction
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            with self.get_cursor(commit=commit) as cursor:
-                cursor.execute(query, params)
-                logger.info(f"✅ Query executed successfully")
-                return True
-        except Exception as e:
-            logger.error(f"❌ Query execution failed: {str(e)}")
-            return False
-    
-    def fetch_one(self, 
-                  query: str, 
-                  params: Union[tuple, dict] = None) -> Optional[Dict[str, Any]]:
-        """
-        Fetch a single row from database
-        
-        Args:
-            query: SQL SELECT query
-            params: Query parameters
-            
-        Returns:
-            Dictionary representing the row, or None if not found
-        """
-        try:
-            with self.get_cursor(commit=False) as cursor:
-                cursor.execute(query, params)
-                result = cursor.fetchone()
-                return dict(result) if result else None
-        except Exception as e:
-            logger.error(f"❌ Fetch one failed: {str(e)}")
-            return None
-    
-    def fetch_all(self, 
-                  query: str, 
-                  params: Union[tuple, dict] = None) -> List[Dict[str, Any]]:
-        """
-        Fetch all rows from database
-        
-        Args:
-            query: SQL SELECT query
-            params: Query parameters
-            
-        Returns:
-            List of dictionaries representing rows
-        """
-        try:
-            with self.get_cursor(commit=False) as cursor:
-                cursor.execute(query, params)
-                results = cursor.fetchall()
-                return [dict(row) for row in results] if results else []
-        except Exception as e:
-            logger.error(f"❌ Fetch all failed: {str(e)}")
-            return []
-    
-    def fetch_many(self, 
-                   query: str, 
-                   params: Union[tuple, dict] = None,
-                   size: int = 100) -> List[Dict[str, Any]]:
-        """
-        Fetch multiple rows from database
-        
-        Args:
-            query: SQL SELECT query
-            params: Query parameters
-            size: Number of rows to fetch
-            
-        Returns:
-            List of dictionaries representing rows
-        """
-        try:
-            with self.get_cursor(commit=False) as cursor:
-                cursor.execute(query, params)
-                results = cursor.fetchmany(size)
-                return [dict(row) for row in results] if results else []
-        except Exception as e:
-            logger.error(f"❌ Fetch many failed: {str(e)}")
-            return []
-    
-    # ==================== Generic CRUD Operations ====================
-    
-    def insert(self, 
-               table: str, 
-               data: Dict[str, Any],
-               returning: str = None) -> Optional[Dict[str, Any]]:
-        """
-        Insert a single row into table
-        
-        Args:
-            table: Table name
-            data: Dictionary with column names and values
-            returning: Column name to return (e.g., 'id' or '*')
-            
-        Returns:
-            Dictionary with returned columns if returning is specified, else None
-        """
-        try:
-            columns = list(data.keys())
-            values = list(data.values())
-            
-            # Build query
-            columns_str = ', '.join(columns)
-            placeholders = ', '.join(['%s'] * len(values))
-            query = f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
-            
-            if returning:
-                query += f" RETURNING {returning}"
-            
-            with self.get_cursor() as cursor:
-                cursor.execute(query, values)
-                
-                if returning:
-                    result = cursor.fetchone()
-                    return dict(result) if result else None
-                
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Insert failed: {str(e)}")
-            return None
-    
-    def insert_many(self, 
-                    table: str, 
-                    data_list: List[Dict[str, Any]]) -> int:
-        """
-        Insert multiple rows into table
-        
-        Args:
-            table: Table name
-            data_list: List of dictionaries with column names and values
-            
-        Returns:
-            Number of rows inserted
-        """
-        if not data_list:
-            return 0
-        
-        try:
-            # Assume all dictionaries have the same keys
-            columns = list(data_list[0].keys())
-            columns_str = ', '.join(columns)
-            placeholders = ', '.join(['%s'] * len(columns))
-            
-            query = f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
-            
-            values_list = [list(data.values()) for data in data_list]
-            
-            with self.get_cursor() as cursor:
-                extras.execute_batch(cursor, query, values_list)
-                return len(values_list)
-                
-        except Exception as e:
-            logger.error(f"❌ Insert many failed: {str(e)}")
-            return 0
-    
-    def update(self, 
-               table: str, 
-               data: Dict[str, Any],
-               where: Dict[str, Any],
-               returning: str = None) -> Optional[Dict[str, Any]]:
-        """
-        Update rows in table
-        
-        Args:
-            table: Table name
-            data: Dictionary with column names and new values
-            where: Dictionary with conditions (combined with AND)
-            returning: Column name to return (e.g., 'id' or '*')
-            
-        Returns:
-            Dictionary with returned columns if returning is specified, else None
-        """
-        try:
-            # Build SET clause
-            set_parts = [f"{col} = %s" for col in data.keys()]
-            set_clause = ', '.join(set_parts)
-            
-            # Build WHERE clause
-            where_parts = [f"{col} = %s" for col in where.keys()]
-            where_clause = ' AND '.join(where_parts)
-            
-            # Combine values
-            values = list(data.values()) + list(where.values())
-            
-            query = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
-            
-            if returning:
-                query += f" RETURNING {returning}"
-            
-            with self.get_cursor() as cursor:
-                cursor.execute(query, values)
-                
-                if returning:
-                    result = cursor.fetchone()
-                    return dict(result) if result else None
-                
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Update failed: {str(e)}")
-            return None
-    
-    def delete(self, 
-               table: str, 
-               where: Dict[str, Any],
-               returning: str = None) -> Optional[Union[int, List[Dict[str, Any]]]]:
-        """
-        Delete rows from table
-        
-        Args:
-            table: Table name
-            where: Dictionary with conditions (combined with AND)
-            returning: Column name to return (e.g., 'id' or '*')
-            
-        Returns:
-            Number of deleted rows, or list of returned rows if returning is specified
-        """
-        try:
-            # Build WHERE clause
-            where_parts = [f"{col} = %s" for col in where.keys()]
-            where_clause = ' AND '.join(where_parts)
-            values = list(where.values())
-            
-            query = f"DELETE FROM {table} WHERE {where_clause}"
-            
-            if returning:
-                query += f" RETURNING {returning}"
-            
-            with self.get_cursor() as cursor:
-                cursor.execute(query, values)
-                
-                if returning:
-                    results = cursor.fetchall()
-                    return [dict(row) for row in results] if results else []
-                
-                return cursor.rowcount
-                
-        except Exception as e:
-            logger.error(f"❌ Delete failed: {str(e)}")
-            return 0 if not returning else []
-    
-    def select(self, 
-               table: str,
-               columns: List[str] = None,
-               where: Dict[str, Any] = None,
-               order_by: str = None,
-               limit: int = None,
-               offset: int = None) -> List[Dict[str, Any]]:
-        """
-        Select rows from table
-        
-        Args:
-            table: Table name
-            columns: List of column names to select (default: all *)
-            where: Dictionary with conditions (combined with AND)
-            order_by: ORDER BY clause (e.g., 'created_at DESC')
-            limit: Maximum number of rows
-            offset: Number of rows to skip
-            
-        Returns:
-            List of dictionaries representing rows
-        """
-        try:
-            # Build SELECT clause
-            columns_str = ', '.join(columns) if columns else '*'
-            query = f"SELECT {columns_str} FROM {table}"
-            values = []
-            
-            # Build WHERE clause
-            if where:
-                where_parts = [f"{col} = %s" for col in where.keys()]
-                where_clause = ' AND '.join(where_parts)
-                query += f" WHERE {where_clause}"
-                values = list(where.values())
-            
-            # Add ORDER BY
-            if order_by:
-                query += f" ORDER BY {order_by}"
-            
-            # Add LIMIT and OFFSET
-            if limit:
-                query += f" LIMIT {limit}"
-            if offset:
-                query += f" OFFSET {offset}"
-            
-            return self.fetch_all(query, tuple(values) if values else None)
-            
-        except Exception as e:
-            logger.error(f"❌ Select failed: {str(e)}")
-            return []
-    
-    # ==================== Table Management ====================
-    
-    def table_exists(self, table: str) -> bool:
-        """
-        Check if table exists
-        
-        Args:
-            table: Table name
-            
-        Returns:
-            True if table exists, False otherwise
-        """
-        query = """
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = %s
-            )
-        """
-        result = self.fetch_one(query, (table,))
-        return result.get('exists', False) if result else False
-    
-    def create_table(self, table: str, schema: str) -> bool:
-        """
-        Create a table with given schema
-        
-        Args:
-            table: Table name
-            schema: Table schema definition (column definitions)
-            
-        Example:
-            schema = '''
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100) NOT NULL,
-                data JSONB,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            '''
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        query = f"CREATE TABLE IF NOT EXISTS {table} ({schema})"
-        return self.execute_query(query)
-    
-    def drop_table(self, table: str, cascade: bool = False) -> bool:
-        """
-        Drop a table
-        
-        Args:
-            table: Table name
-            cascade: Whether to cascade drop
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        cascade_str = " CASCADE" if cascade else ""
-        query = f"DROP TABLE IF EXISTS {table}{cascade_str}"
-        return self.execute_query(query)
-    
-    def get_table_columns(self, table: str) -> List[Dict[str, Any]]:
-        """
-        Get column information for a table
-        
-        Args:
-            table: Table name
-            
-        Returns:
-            List of dictionaries with column information
-        """
-        query = """
-            SELECT 
-                column_name, 
-                data_type, 
-                is_nullable,
-                column_default
-            FROM information_schema.columns
-            WHERE table_schema = 'public' 
-            AND table_name = %s
-            ORDER BY ordinal_position
-        """
-        return self.fetch_all(query, (table,))
-    
-    def list_tables(self) -> List[str]:
-        """
-        List all tables in database
-        
-        Returns:
-            List of table names
-        """
-        query = """
-            SELECT table_name 
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-            ORDER BY table_name
-        """
-        results = self.fetch_all(query)
-        return [row['table_name'] for row in results]
-    
-    # ==================== JSON Specific Methods ====================
-    
-    def insert_json(self, 
-                    table: str, 
-                    json_column: str,
-                    json_data: Union[Dict, List],
-                    additional_columns: Dict[str, Any] = None,
-                    returning: str = None) -> Optional[Dict[str, Any]]:
-        """
-        Insert row with JSON data
-        
-        Args:
-            table: Table name
-            json_column: Name of JSONB column
-            json_data: JSON data (dict or list)
-            additional_columns: Other columns to insert
-            returning: Column name to return
-            
-        Returns:
-            Dictionary with returned columns if returning is specified
-        """
-        data = {json_column: json.dumps(json_data)}
-        if additional_columns:
-            data.update(additional_columns)
-        
-        return self.insert(table, data, returning)
-    
-    def query_json(self,
-                   table: str,
-                   json_column: str,
-                   json_path: str,
-                   json_value: Any,
-                   operator: str = '=') -> List[Dict[str, Any]]:
-        """
-        Query rows by JSON field value
-        
-        Args:
-            table: Table name
-            json_column: Name of JSONB column
-            json_path: JSON path (e.g., 'metadata->>'key'')
-            json_value: Value to match
-            operator: Comparison operator (=, !=, >, <, etc.)
-            
-        Returns:
-            List of dictionaries representing matching rows
-        """
-        query = f"SELECT * FROM {table} WHERE {json_column}->>{json_path} {operator} %s"
-        return self.fetch_all(query, (json_value,))
-    
-    # ==================== Transaction Management ====================
-    
-    @contextmanager
-    def transaction(self):
-        """
-        Context manager for explicit transaction handling
-        
-        Usage:
-            with service.transaction() as cursor:
-                cursor.execute("INSERT ...")
-                cursor.execute("UPDATE ...")
-                # Commits automatically if no exception
-                # Rolls back if exception occurs
-        """
-        with self.get_connection() as conn:
-            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
-            try:
-                yield cursor
-                conn.commit()
-                logger.info("✅ Transaction committed")
-            except Exception as e:
-                conn.rollback()
-                logger.error(f"❌ Transaction rolled back: {str(e)}")
-                raise
-            finally:
-                cursor.close()
-    
-    # ==================== Utility Methods ====================
-    
-    def get_connection_info(self) -> Dict[str, Any]:
-        """Get database connection information"""
-        return {
-            'host': self.host,
-            'port': self.port,
-            'database': self.database,
-            'user': self.user
-        }
-    
-    def get_database_info(self) -> Dict[str, Any]:
-        """Get database statistics and information"""
-        try:
-            # Get database size
-            size_query = """
-                SELECT pg_size_pretty(pg_database_size(%s)) as size
-            """
-            size_result = self.fetch_one(size_query, (self.database,))
-            
-            # Get table count
-            tables = self.list_tables()
-            
-            # Get connection count
-            conn_query = """
-                SELECT count(*) as connections 
-                FROM pg_stat_activity 
-                WHERE datname = %s
-            """
-            conn_result = self.fetch_one(conn_query, (self.database,))
-            
-            return {
-                'database': self.database,
-                'size': size_result.get('size') if size_result else 'unknown',
-                'table_count': len(tables),
-                'tables': tables,
-                'active_connections': conn_result.get('connections', 0) if conn_result else 0
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to get database info: {str(e)}")
-            return {
-                'database': self.database,
-                'error': str(e)
-            }
-    
-    def close(self):
-        """Close all connections in pool"""
-        if self.connection_pool:
-            self.connection_pool.closeall()
-            logger.info("🔌 PostgreSQL connection pool closed")
+                else:
+                    conn.rollback()
 
+                return result
 
-# ==================== Example Usage ====================
+    def interactive_sql_shell(self) -> None:
+        print("Interactive PostgreSQL debug shell")
+        print("Type SQL statements and press Enter.")
+        print("Type 'quit' or 'exit' to leave.")
 
-def test_postgres_service():
-    """Test function for PostgreSQL service"""
-    try:
-        # Initialize service
-        service = PostgreSQLService()
-        print("✅ PostgreSQL service initialized")
-        
-        # Get connection info
-        info = service.get_connection_info()
-        print(f"📋 Connection: {info['user']}@{info['host']}:{info['port']}/{info['database']}")
-        
-        # Create test table
-        print("\n📦 Creating test table...")
-        test_table = "test_service_data"
-        
-        schema = """
-            id SERIAL PRIMARY KEY,
-            service_name VARCHAR(100) NOT NULL,
-            config JSONB,
-            metrics JSONB,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        """
-        
-        if service.create_table(test_table, schema):
-            print(f"  ✅ Table '{test_table}' created")
-        
-        # Insert test data
-        print("\n📝 Inserting test data...")
-        test_data = {
-            'service_name': 'signaling_service',
-            'config': json.dumps({
-                'model': 'SignalingModelV1',
-                'version': 'v1.0',
-                'parameters': {'learning_rate': 0.001}
-            }),
-            'metrics': json.dumps({
-                'accuracy': 0.92,
-                'loss': 0.15
-            })
-        }
-        
-        result = service.insert(test_table, test_data, returning='id')
-        if result:
-            print(f"  ✅ Inserted row with id: {result['id']}")
-            inserted_id = result['id']
-        
-        # Select data
-        print("\n🔍 Selecting data...")
-        rows = service.select(
-            test_table,
-            where={'service_name': 'signaling_service'},
-            order_by='created_at DESC'
-        )
-        
-        for row in rows:
-            print(f"  📊 Row {row['id']}: {row['service_name']}")
-            print(f"     Config: {row['config']}")
-            print(f"     Metrics: {row['metrics']}")
-        
-        # Update data
-        print("\n✏️ Updating data...")
-        service.update(
-            test_table,
-            data={'metrics': json.dumps({'accuracy': 0.95, 'loss': 0.12})},
-            where={'id': inserted_id}
-        )
-        print("  ✅ Data updated")
-        
-        # Insert multiple rows
-        print("\n📝 Inserting multiple rows...")
-        multi_data = [
-            {
-                'service_name': 'agent_1',
-                'config': json.dumps({'type': 'trader'}),
-                'metrics': json.dumps({'profit': 1500.50})
+        with self.connection() as conn:
+            conn.autocommit = False
+
+            while True:
+                try:
+                    query = input("\nsql> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nExiting shell.")
+                    break
+
+                if not query:
+                    continue
+
+                lowered = query.lower()
+                if lowered in {"quit", "exit"}:
+                    print("Bye.")
+                    break
+
+                if lowered == "rollback":
+                    conn.rollback()
+                    print("Rolled back current transaction.")
+                    continue
+
+                if lowered == "commit":
+                    conn.commit()
+                    print("Committed current transaction.")
+                    continue
+
+                try:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute(query)
+
+                        if cur.description:
+                            rows = cur.fetchall()
+                            columns = [desc.name for desc in cur.description]
+                            print(f"Columns: {columns}")
+                            print(json.dumps([dict(r) for r in rows], indent=2, default=str))
+                            print(f"{len(rows)} row(s)")
+                        else:
+                            print(f"OK - {cur.rowcount} row(s) affected")
+
+                except Exception as e:
+                    conn.rollback()
+                    print(f"ERROR: {e}")
+    
+def test_create_and_fetch_three_agents() -> List[Dict[str, Any]]:
+    db = DatabaseClient()
+
+    agents_to_create = [
+        {
+            "user_id": 1,
+            "agent_name": "signal-aapl",
+            "training_status": "PENDING",
+            "version": "v1",
+            "feature_name": "signaling",
+            "feature_description": "Signaling service",
+            "parameters": {
+                "equity": {"type": "STRING", "required": True, "value": "AAPL"},
+                "time_frequency": {"type": "ENUM", "required": True, "value": "1H", "enum_values": ["1MIN", "5MIN", "1H", "1D"]},
+                "observation_horizon": {"type": "INTEGER", "required": True, "value": 120},
+                "prediction_horizon": {"type": "INTEGER", "required": True, "value": 8},
+                "news_resources": {"type": "STRING", "value": ["reuters", "bloomberg"]},
+                "confidence_level": {"type": "DOUBLE", "value": 0.8},
             },
-            {
-                'service_name': 'agent_2',
-                'config': json.dumps({'type': 'analyzer'}),
-                'metrics': json.dumps({'accuracy': 0.88})
-            }
-        ]
-        count = service.insert_many(test_table, multi_data)
-        print(f"  ✅ Inserted {count} rows")
-        
-        # Get database info
-        print("\n📊 Database information:")
-        db_info = service.get_database_info()
-        print(f"  Size: {db_info.get('size')}")
-        print(f"  Tables: {db_info.get('table_count')}")
-        print(f"  Active connections: {db_info.get('active_connections')}")
-        
-        # Clean up
-        print("\n🧹 Cleaning up...")
-        service.drop_table(test_table)
-        print(f"  ✅ Dropped table '{test_table}'")
-        
-        # Close connection
-        service.close()
-        
-    except ValueError as e:
-        print(f"❌ Configuration error: {str(e)}")
-        print("💡 Make sure to set PostgreSQL credentials in .env file")
-    except Exception as e:
-        print(f"❌ Test failed: {str(e)}")
+        },
+        {
+            "user_id": 1,
+            "agent_name": "signal-tsla",
+            "training_status": "IN_PROGRESS",
+            "version": "v1",
+            "feature_name": "signaling",
+            "feature_description": "Signaling service",
+            "parameters": {
+                "equity": {"type": "STRING", "required": True, "value": "TSLA"},
+                "time_frequency": {"type": "ENUM", "required": True, "value": "1D", "enum_values": ["1H", "1D"]},
+                "observation_horizon": {"type": "INTEGER", "required": True, "value": 30},
+                "prediction_horizon": {"type": "INTEGER", "required": True, "value": 5},
+                "signal_frequency": {"type": "INTEGER", "required": True, "value": 1},
+            },
+        },
+        {
+            "user_id": 1,
+            "agent_name": "risk-btc",
+            "training_status": "ACTIVE",
+            "version": "v2",
+            "feature_name": "risk_management",
+            "feature_description": "Risk service",
+            "parameters": {
+                "asset": {"type": "STRING", "required": True, "value": "BTCUSD"},
+                "max_drawdown": {"type": "DOUBLE", "required": True, "value": 0.12},
+                "use_stop_loss": {"type": "BOOLEAN", "required": True, "value": True},
+                "lookback_window": {"type": "INTEGER", "required": True, "value": 90},
+            },
+        },
+    ]
+
+    created_agent_ids = []
+    for agent_data in agents_to_create:
+        created_agent_ids.append(db.create_agent_with_parameters(**agent_data))
+
+    return [db.build_service_payload(agent_id) for agent_id in created_agent_ids]
+
 
 
 if __name__ == "__main__":
-    test_postgres_service()
+    db = DatabaseClient()
+    db.interactive_sql_shell()
