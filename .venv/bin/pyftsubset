@@ -1,4 +1,4 @@
-#!/home/kian/private/FiKing-Trader/.venv/bin/python
+#!/opt/fiking-trader/.venv/bin/python3.12
 import sys
 from fontTools.subset import main
 if __name__ == '__main__':
