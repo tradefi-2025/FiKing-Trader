@@ -3,10 +3,15 @@ import logging
 import torch
 import torch.nn as nn
 import json
+from src.database_handlers.postgres import DatabaseClient
+from datetime import datetime, timezone
+
+
 contextualizer_config = json.load(open("src/encoders/config.json", "r"))
 logger = logging.getLogger(__name__)
 @dataclass
 class SignalingConfig:
+    db=DatabaseClient()  # Database client for agent state management
     name: str = "signaling"
     version: str = "v2"
     batch_size: int = 16
@@ -25,10 +30,27 @@ class SignalingConfig:
     d_ff: int = 2048
     dropout: float = 0.1
     @staticmethod
-    def send_signal(message,destination):
+    def send_signal(generated_signal,agent_id):
         """Send signal to destination (e.g., trading engine)"""
-        logger.info(f"Sending signal to {destination}: {message}")
-        #TODO: Implement actual communication logic (e.g., via RabbitMQ, REST API, etc.)
-
+        try:
+            SignalingConfig.db.create_signal(
+                agent_id=agent_id,
+                signal_date=datetime.now(timezone.utc),
+                estimated_action=generated_signal.get("estimated_action"),
+                signal=generated_signal.get("signal"),
+                probability=generated_signal.get("probability"),
+                probabilities=generated_signal.get("probabilities", {}),
+                volume=generated_signal.get("volume"),
+                notional=generated_signal.get("notional"),
+                stop_loss_price=generated_signal.get("stop_loss_price"),
+                risk_amount=generated_signal.get("risk_amount"),
+                sizing_method=generated_signal.get("sizing_method"),
+                warnings=generated_signal.get("warnings", []),
+                status="NEW",
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to persist generated signal for agent {agent_id}, user {g.user_id}: {e}; signal={generated_signal}"
+            )
     def get(self, key, default=None):
         return getattr(self, key, default)

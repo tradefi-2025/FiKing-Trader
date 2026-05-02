@@ -180,7 +180,7 @@ class SignalingWorker:
                 self.active_agents[model_id] = stop_event
                 self.redis_client.sadd(self.redis_dict_name, model_id)
 
-            
+            self.db.mark_agent_active(model_id)
             logger.info(f"✅ Successfully launched agent: {model_id}")
             logger.info(f"📊 Active agents: {len(self.active_agents)}")
             
@@ -198,9 +198,9 @@ class SignalingWorker:
             
         except Exception as e:
             logger.error(f"❌ Error processing launch request: {str(e)}")
-            
+            self.db.mark_agent_cancelled(request_data['model_id'])
             # Send error response to reply_to queue if specified
-            if reply_to:
+            if reply_to:    
                 self._send_launch_response(
                     reply_to=reply_to,
                     correlation_id=correlation_id,
@@ -320,6 +320,7 @@ class SignalingWorker:
             
         except Exception as e:
             logger.error(f"❌ Error processing training request: {str(e)}")
+            self.db.mark_agent_failed(request_data['model_id'])
             return False
     
     def _process_stop_request(self, request_data):

@@ -102,9 +102,7 @@ class DatabaseClient:
     
     def mark_agent_failed(self, agent_id: int) -> Optional[Dict[str, Any]]:
         return self.update_agent_status(agent_id, "FAILED")
-    
-    def mark_agent_failed(self, agent_id: int) -> Optional[Dict[str, Any]]:
-        return self.update_agent_status(agent_id, "FAILED")
+
 
     def mark_agent_cancelled(self, agent_id: int) -> Optional[Dict[str, Any]]:
         return self.update_agent_status(agent_id, "CANCELLED")
@@ -115,7 +113,7 @@ class DatabaseClient:
     def mark_agent_inactive(self, agent_id: int) -> Optional[Dict[str, Any]]:
         return self.update_agent_status(agent_id, "INACTIVE")
 
-        
+
     def get_agent(self, agent_id: int) -> Optional[Dict[str, Any]]:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute(

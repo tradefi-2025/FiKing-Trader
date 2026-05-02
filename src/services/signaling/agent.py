@@ -355,9 +355,9 @@ class Agent:
                 verification_result = self.verification.verify(result)
 
                 if result['estimated_action'] == 'BUY' and verification_result['is_valid']:
-                    self.config.send_signal(message='long', destination=self.client)
+                    self.config.send_signal(message=result, model_id=self.model_id)
                 elif result['estimated_action'] == 'SELL' and verification_result['is_valid']:
-                    self.config.send_signal(message='short', destination=self.client)
+                    self.config.send_signal(message=result, model_id=self.model_id)
 
                 logger.info(f"Prediction: {result}, Verification: {verification_result}")
                 time.sleep(freq)
