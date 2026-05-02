@@ -7,7 +7,7 @@ from unittest import result
 import pika
 from src.utils.env import load_env
 from ...database_handlers.mongoDB import MongoDBService
-from ...database_handlers.postgres import PostgreSQLService
+from ...database_handlers.postgres import DatabaseClient
 from .config import SignalingConfig
 import pandas as pd
 
@@ -116,7 +116,7 @@ class Agent:
         self.inference_thread = None
         self.main_loop_thread = None
         self.mongo_service = MongoDBService()
-        self.postgres_service = PostgreSQLService()
+        self.postgres_service = DatabaseClient()
         self.client = None
 
     def _get_rabbitmq_connection(self):
