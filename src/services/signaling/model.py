@@ -608,6 +608,10 @@ class SignalingModelV4(nn.Module):
                     continue
 
                 loss.backward()
+                logging.info(
+                    f"  epoch={epoch+1}/{self.epoch}  batch={n_batches}"
+                    f"  loss={loss.item():.6f}"
+                )
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
                 optimizer.step()
 

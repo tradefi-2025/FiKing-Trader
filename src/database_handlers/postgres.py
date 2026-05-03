@@ -32,7 +32,17 @@ AGENT_STATUS_VALUES = {
 class DatabaseClient:
     """Generic communication layer for a remote PostgreSQL database using env vars."""
 
-    
+    SIGNAL_STATUS_VALUES = {"NEW", "READ", "ARCHIVED"}
+    AGENT_STATUS_VALUES = {
+    "PENDING",
+    "IN_PROGRESS",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "ACTIVE",
+    "INACTIVE",
+    "CREATED",
+    }
 
     def __init__(self) -> None:
         self.host = self._get_env("POSTGRES_HOST")

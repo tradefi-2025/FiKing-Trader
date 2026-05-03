@@ -18,25 +18,98 @@ from flask import Flask, g, jsonify, request
 
 from src.database_handlers.postgres import DatabaseClient
 from src.utils.env import load_env
+from werkzeug.middleware.proxy_fix import ProxyFix
+from flask_cors import CORS
 
 
 # Load environment variables first
 load_env()
 
+def _split_csv_env(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+    
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # Flask app
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+
 app.config["JSON_SORT_KEYS"] = False
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
 # Auth config
-JWT_SECRET = os.getenv("JWT_SHARED_SECRET")
+JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_ISSUER = os.getenv("JWT_ISSUER")
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE")
+FLASK_ENV = os.getenv("FLASK_ENV", "production")
+FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
+FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+AUTH_MODE = os.getenv("AUTH_MODE", "cookie").strip().lower()  # bearer | cookie | both
+
+CORS_ALLOWED_ORIGINS = _split_csv_env("CORS_ALLOWED_ORIGINS")
+CORS_ALLOWED_METHODS = _split_csv_env(
+    "CORS_ALLOWED_METHODS",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+)
+CORS_ALLOWED_HEADERS = _split_csv_env(
+    "CORS_ALLOWED_HEADERS",
+    "Content-Type,Authorization",
+)
+CORS_SUPPORTS_CREDENTIALS = _env_bool("CORS_SUPPORTS_CREDENTIALS", False)
+
+JWT_COOKIE_NAME = os.getenv("JWT_COOKIE_NAME", "AccessToken")
+JWT_COOKIE_SECURE = _env_bool("JWT_COOKIE_SECURE", FLASK_ENV == "production")
+JWT_COOKIE_SAMESITE = os.getenv("JWT_COOKIE_SAMESITE", "None")
+JWT_COOKIE_DOMAIN = os.getenv("JWT_COOKIE_DOMAIN")
+JWT_COOKIE_MAX_AGE = int(os.getenv("JWT_COOKIE_MAX_AGE", "3600"))
+JWT_EXPIRATION_SECONDS = int(os.getenv("JWT_EXPIRATION_SECONDS", "3600"))
+
+CORS(
+    app,
+    origins=CORS_ALLOWED_ORIGINS if CORS_ALLOWED_ORIGINS else [],
+    methods=CORS_ALLOWED_METHODS,
+    allow_headers=CORS_ALLOWED_HEADERS,
+    supports_credentials=CORS_SUPPORTS_CREDENTIALS,
+    vary_header=True,
+)
+
+validate_startup_config()
+
+def validate_startup_config():
+    errors = []
+
+    if not JWT_SECRET:
+        errors.append("JWT_SECRET is required")
+
+    if FLASK_ENV == "production":
+        if not CORS_ALLOWED_ORIGINS:
+            errors.append("CORS_ALLOWED_ORIGINS must be set in production")
+        if CORS_SUPPORTS_CREDENTIALS and "*" in CORS_ALLOWED_ORIGINS:
+            errors.append("CORS_ALLOWED_ORIGINS cannot contain '*' when credentials are enabled")
+        if AUTH_MODE in {"cookie", "both"}:
+            if JWT_COOKIE_SAMESITE.lower() == "none" and not JWT_COOKIE_SECURE:
+                errors.append("JWT_COOKIE_SECURE must be true when JWT_COOKIE_SAMESITE=None")
+
+    if AUTH_MODE not in {"bearer", "cookie", "both"}:
+        errors.append("AUTH_MODE must be one of: bearer, cookie, both")
+
+    if errors:
+        raise RuntimeError("Invalid startup configuration: " + "; ".join(errors))
+
+
+
 
 # Services
 _db_service = DatabaseClient()
@@ -62,15 +135,37 @@ def op_response(success: bool, error_message: str | None = None, status_code: in
     }), status_code
 
 
+def _extract_token():
+    auth_header = request.headers.get("Authorization", "").strip()
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:].strip(), "bearer"
+
+    cookie_token = request.cookies.get(JWT_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token, "cookie"
+
+    return None, None
+
+
 def require_internal_jwt(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if not JWT_SECRET:
             return op_response(False, "JWT secret is not configured on the server.", 500)
 
-        token = request.cookies.get("AccessToken")
+        token, token_source = _extract_token()
+
+        if AUTH_MODE == "bearer" and token_source != "bearer":
+            return op_response(False, "Missing Bearer token.", 401)
+
+        if AUTH_MODE == "cookie" and token_source != "cookie":
+            return op_response(False, f"Missing {JWT_COOKIE_NAME} cookie.", 401)
+
+        if AUTH_MODE == "both" and not token:
+            return op_response(False, "Missing authentication token.", 401)
+
         if not token:
-            return op_response(False, "Missing AccessToken cookie.", 401)
+            return op_response(False, "Missing authentication token.", 401)
 
         decode_kwargs = {
             "key": JWT_SECRET,
@@ -80,7 +175,6 @@ def require_internal_jwt(fn):
 
         if JWT_ISSUER:
             decode_kwargs["issuer"] = JWT_ISSUER
-
         if JWT_AUDIENCE:
             decode_kwargs["audience"] = JWT_AUDIENCE
 
@@ -106,6 +200,7 @@ def require_internal_jwt(fn):
 
         g.user_email = payload.get("sub")
         g.jwt_payload = payload
+        g.auth_mode = token_source
         return fn(*args, **kwargs)
 
     return wrapper
@@ -164,7 +259,7 @@ def _poll_pending_agents(interval: int = 10):
                 channel = connection.channel()
 
                 for agent in pending_agents:
-                    agent_id = agent["id"]
+                    agent_id = agent["agent_id"]
                     training_request = _db_service.build_flat_metadata(agent_id=agent_id)
 
                     service = training_request.get("service", "signaling")
@@ -196,7 +291,18 @@ def _poll_pending_agents(interval: int = 10):
         time.sleep(interval)
 
 
-@app.route("/agent/lauch", methods=["POST"])
+def start_background_poller():
+    """Start the agent poller. Called by gunicorn post_worker_init (worker 1 only)."""
+    t = threading.Thread(
+        target=_poll_pending_agents,
+        kwargs={"interval": int(os.getenv("AGENT_POLL_INTERVAL", 10))},
+        daemon=True,
+        name="signalling-agent-poller",
+    )
+    t.start()
+    logger.info("Background agent poller started.")
+
+@app.route("/ai/agent/launch", methods=["POST", "OPTIONS"])
 @require_internal_jwt
 def start_model():
     """
@@ -270,7 +376,12 @@ def start_model():
             connection.close()
 
 
-@app.route("/agent/inference", methods=["POST"])
+@app.route("/ai/agent/health", methods=["GET"])
+def check_agent_health():
+    return op_response(True, "Agent health check endpoint is a placeholder and always returns healthy.", 200)
+
+
+@app.route("/ai/agent/inference", methods=["POST", "OPTIONS"])
 @require_internal_jwt
 def get_signals():
     """
@@ -376,7 +487,36 @@ def get_signals():
         if connection and connection.is_open:
             connection.close()
 
+@app.route("/debug/patch-test", methods=["PATCH", "OPTIONS"])
+@require_internal_jwt
+def patch_test():
+    if request.method == "OPTIONS":
+        return ("", 204)
 
+    payload = request.get_json(silent=True) or {}
+    return jsonify({
+        "success": True,
+        "errorMessage": None,
+        "method": "PATCH",
+        "payload": payload,
+        "userId": g.user_id,
+    }), 200
+
+@app.route("/whoami", methods=["GET", "OPTIONS"])
+@require_internal_jwt
+def whoami():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    return jsonify({
+        "success": True,
+        "errorMessage": None,
+        "data": {
+            "userId": g.user_id,
+            "email": g.user_email,
+            "authMode": g.get("auth_mode", None),
+        }
+    }), 200
 # ==================== Data Management ====================
 
 @app.route("/data/timeseries", methods=["POST"])
@@ -452,13 +592,7 @@ def internal_error(error):
 
 def run_server(host="0.0.0.0", port=5000, debug=False):
     logger.info(f"Starting Flask server on {host}:{port}")
-    poller_thread = threading.Thread(
-        target=_poll_pending_agents,
-        kwargs={"interval": int(os.getenv("AGENT_POLL_INTERVAL", 10))},
-        daemon=True,
-        name="signalling-agent-poller",
-    )
-    poller_thread.start()
+    
     app.run(host=host, port=port, debug=debug)
 
 
