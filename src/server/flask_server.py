@@ -85,7 +85,6 @@ CORS(
     vary_header=True,
 )
 
-validate_startup_config()
 
 def validate_startup_config():
     errors = []
@@ -107,6 +106,8 @@ def validate_startup_config():
 
     if errors:
         raise RuntimeError("Invalid startup configuration: " + "; ".join(errors))
+
+validate_startup_config()
 
 
 
