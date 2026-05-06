@@ -142,6 +142,7 @@ def _extract_token():
         return auth_header[7:].strip(), "bearer"
 
     cookie_token = request.cookies.get(JWT_COOKIE_NAME)
+    print(request.cookies)
     if cookie_token:
         return cookie_token, "cookie"
 
@@ -155,6 +156,7 @@ def require_internal_jwt(fn):
             return op_response(False, "JWT secret is not configured on the server.", 500)
 
         token, token_source = _extract_token()
+
 
         if AUTH_MODE == "bearer" and token_source != "bearer":
             return op_response(False, "Missing Bearer token.", 401)
@@ -181,6 +183,7 @@ def require_internal_jwt(fn):
 
         try:
             payload = jwt.decode(token, **decode_kwargs)
+            print(payload)
         except jwt.ExpiredSignatureError:
             return op_response(False, "Authentication token has expired.", 401)
         except jwt.InvalidIssuerError:
@@ -315,10 +318,10 @@ def start_model():
         }
     """
     body = request.get_json() or {}
-    agent_id = body.get("agent_id")
+    agent_id = body.get("agentId")
 
     if not agent_id:
-        return op_response(False, "Missing required field: agent_id (or model_id for backward compatibility).", 400)
+        return op_response(False, "Missing required field: agentId (or modelId for backward compatibility).", 400)
 
     try:
         agent_id = int(agent_id)
@@ -390,7 +393,9 @@ def get_signals():
     and return OperationResponse.
     """
     body = request.get_json() or {}
-    agent_id = body.get("agent_id")
+    print(body)
+    
+    agent_id = body.get("agentId")
 
     if not agent_id:
         return op_response(False, "Missing required field: agent_id (or model_id for backward compatibility).", 400)

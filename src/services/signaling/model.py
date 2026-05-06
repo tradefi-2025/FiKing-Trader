@@ -643,8 +643,8 @@ class SignalingModelV4(nn.Module):
     def fit(self, dataloader, label_percentages=None):
         DEVICE    = 'cuda' if torch.cuda.is_available() else 'cpu'
         model     = self
-        self.pretrain(dataloader)
-        self._reset_nan_params()
+        # self.pretrain(dataloader)
+        # self._reset_nan_params()
         model.train()
 
         optimizer = optim.Adam(model.parameters(), lr=self.lr, weight_decay=1e-4)
