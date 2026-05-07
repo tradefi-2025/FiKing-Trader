@@ -311,7 +311,7 @@ class SignalingWorker:
             
             if success:
                 logger.info(f"✅ Successfully trained and stored model: {request_data['model_id']}")
-                self.db.mark_agent_created(request_data['model_id'])
+                self.db.mark_agent_inactive(request_data['model_id'])
             else:
                 logger.error(f"❌ Failed to train model: {request_data['model_id']}")
                 self.db.mark_agent_failed(request_data['model_id'])

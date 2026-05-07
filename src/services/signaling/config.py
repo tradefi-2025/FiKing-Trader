@@ -14,7 +14,7 @@ class SignalingConfig:
     db=DatabaseClient()  # Database client for agent state management
     name: str = "signaling"
     version: str = "v2"
-    batch_size: int = 16
+    batch_size: int = 8
     learning_rate: float = 1e-3
     d_model: int=512
     d_ts: int = contextualizer_config["ts_encoder"]["output_dim"]

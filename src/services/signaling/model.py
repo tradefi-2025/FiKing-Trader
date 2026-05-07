@@ -203,6 +203,11 @@ class TSEncoder(nn.Module):
         B, C, L = x.shape
         P = self.patch_size
 
+        # Pad sequence so it is at least one full patch long
+        if L < P:
+            x = F.pad(x, (0, P - L))
+            L = P
+
         x_p = x.reshape(B * C, 1, L).unfold(-1, P, P).squeeze(1)
         x_p = self.patch_norm(self.patch_embed(x_p))  # (B*C, n_patches, d_model)
 
