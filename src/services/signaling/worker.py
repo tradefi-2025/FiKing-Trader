@@ -45,7 +45,7 @@ class SignalingWorker:
         # Queue name for training requests (specific to signaling service)
         self.training_queue_name = 'signaling_training_queue'
         self.launch_queue_name = 'signaling_launch_queue'
-        
+        self.stop_queue_name = 'signaling_stop_queue'
         # Thread tracking (thread-safe)
         self.active_threads = []
         self.threads_lock = threading.Lock()  # Lock for thread-safe access
@@ -485,7 +485,11 @@ class SignalingWorker:
             # Declare launch queue (durable to survive broker restarts)
             channel.queue_declare(queue=self.launch_queue_name, durable=True)
             logger.info(f"✅ Connected to queue: {self.launch_queue_name}")
-            
+
+            # Declare stop queue (durable to survive broker restarts)
+            channel.queue_declare(queue=self.stop_queue_name, durable=True)
+            logger.info(f"✅ Connected to queue: {self.stop_queue_name}")
+
             def callback(ch, method, properties, body):
                 """Callback for processing messages from queue"""
                 try:
@@ -592,6 +596,28 @@ class SignalingWorker:
                     logger.error(f"❌ Error in launch callback: {str(e)}")
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
             
+            def stop_callback(ch, method, properties, body):
+                """Callback for processing stop requests from queue"""
+                try:
+                    request_data = json.loads(body)
+                    model_id = request_data.get('model_id', 'unknown')
+                    logger.info(f"📥 Received stop request: {model_id}")
+
+                    success = self._process_stop_request(request_data)
+
+                    if success:
+                        logger.info(f"✅ Stop request processed successfully: {model_id}")
+                    else:
+                        logger.warning(f"⚠️ Stop request failed (agent may not be running): {model_id}")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Invalid JSON in stop message: {str(e)}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                except Exception as e:
+                    logger.error(f"❌ Error in stop callback: {str(e)}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
             # Set QoS - allow multiple messages to be prefetched for concurrent processing
             channel.basic_qos(prefetch_count=self.max_concurrent_trainings)
             
@@ -606,12 +632,19 @@ class SignalingWorker:
                 queue=self.launch_queue_name,
                 on_message_callback=launch_callback
             )
-            
+
+            # Start consuming messages from stop queue
+            channel.basic_consume(
+                queue=self.stop_queue_name,
+                on_message_callback=stop_callback
+            )
+
             logger.info("🔄 Worker started. Waiting for training and launch requests...")
             logger.info(f"📊 Max concurrent trainings: {self.max_concurrent_trainings}")
             logger.info(f"📊 Max concurrent launches: {self.max_concurrent_launches}")
             logger.info(f"📋 Training queue: {self.training_queue_name}")
             logger.info(f"🚀 Launch queue: {self.launch_queue_name}")
+            logger.info(f"🛑 Stop queue: {self.stop_queue_name}")
             logger.info("Press CTRL+C to stop")
             
             # Block and wait for messages

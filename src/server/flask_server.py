@@ -380,6 +380,67 @@ def start_model():
             connection.close()
 
 
+@app.route("/ai/agent/deactivate", methods=["POST", "OPTIONS"])
+@require_internal_jwt
+def stop_model():
+    """
+    Stop a currently active agent.
+    Response schema:
+        {
+          "success": boolean,
+          "errorMessage": string | null
+        }
+    """
+    body = request.get_json() or {}
+    agent_id = body.get("agentId")
+
+    if not agent_id:
+        return op_response(False, "Missing required field: agentId (or modelId for backward compatibility).", 400)
+
+    try:
+        agent_id = int(agent_id)
+    except (TypeError, ValueError):
+        return op_response(False, f"Invalid agent identifier: {agent_id}", 400)
+
+    agent, error = get_user_agent_or_404(agent_id)
+    if error:
+        return error
+
+    raw_status = agent.get("training_status") or agent.get("status")
+    normalized_status = str(raw_status).replace("_", "").upper() if raw_status else ""
+
+    if normalized_status != "ACTIVE":
+        return op_response(False, f"Agent {agent_id} is not active and cannot be stopped. Current status: {raw_status}.", 409)
+
+    service = agent.get("service", "signaling")
+    queue = f"{service}_stop_queue"
+    connection = None
+
+    try:
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(host=os.getenv("RABBITMQ_HOST", "localhost"))
+        )
+        channel = connection.channel()
+        channel.queue_declare(queue=queue, durable=True)
+
+        channel.basic_publish(
+            exchange="",
+            routing_key=queue,
+            body=json.dumps(agent),
+            properties=pika.BasicProperties(delivery_mode=2),
+        )
+
+        return op_response(True, None, 200)
+
+    except Exception as e:
+        logger.error(f"Stop queue error for agent {agent_id}, user {g.user_id}: {e}")
+        return op_response(False, "Failed to queue stop request.", 500)
+
+    finally:
+        if connection is not None and connection.is_open:
+            connection.close()
+
+
 @app.route("/ai/agent/health", methods=["GET"])
 def check_agent_health():
     return op_response(True, "Agent health check endpoint is a placeholder and always returns healthy.", 200)
