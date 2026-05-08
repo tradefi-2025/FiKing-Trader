@@ -14,9 +14,9 @@ class SignalingConfig:
     db=DatabaseClient()  # Database client for agent state management
     name: str = "signaling"
     version: str = "v2"
-    batch_size: int = 8
+    batch_size: int = 4
     learning_rate: float = 1e-3
-    d_model: int=512
+    d_model: int=256
     d_ts: int = contextualizer_config["ts_encoder"]["output_dim"]
     d_text: int = contextualizer_config["text_encoder"]["output_dim"]
     lr: float = 1e-4  # learning rate alias
@@ -26,8 +26,9 @@ class SignalingConfig:
     step_size: int = 10  # epochs between learning rate decay
     activation: nn.Module = nn.LeakyReLU()
     max_news_per_window: int = 64  # maximum number of news items to consider per time window
-    n_heads: int = 8
-    d_ff: int = 2048
+    n_heads: int = 4
+    num_layers: int = 2
+    d_ff: int = 512
     dropout: float = 0.1
     @staticmethod
     def send_signal(generated_signal,agent_id):
@@ -50,7 +51,7 @@ class SignalingConfig:
             )
         except Exception as e:
             logger.error(
-                f"Failed to persist generated signal for agent {agent_id}, user {g.user_id}: {e}; signal={generated_signal}"
+                f"Failed to persist generated signal for agent {agent_id},: {e}; signal={generated_signal}"
             )
     def get(self, key, default=None):
         return getattr(self, key, default)

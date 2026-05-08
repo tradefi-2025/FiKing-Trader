@@ -354,6 +354,7 @@ class SignalingWorker:
                     del self.active_agents[model_id]
                     self.redis_client.srem(self.redis_dict_name, model_id)
             
+            self.db.mark_agent_inactive(model_id)
             logger.info(f"✅ Successfully stopped agent: {model_id}")
             logger.info(f"📊 Active agents: {len(self.active_agents)}")
             return True
