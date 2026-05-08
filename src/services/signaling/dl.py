@@ -656,7 +656,7 @@ class SignalingDataLoader:
             
             timestamps =  [n['Date'] for n in news]
             ts=(ts-ts.mean(dim=0,keepdim=True))/(ts.std(dim=0,keepdim=True)+1e-8)  # standardize
-            ts_window = ts.unsqueeze(0)
+            ts_window = ts.unsqueeze(0).permute(0, 2, 1)
             representation = self._request_contextualizer(
                 self.equity,
                 timestamps,

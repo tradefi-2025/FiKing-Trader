@@ -203,11 +203,6 @@ class TSEncoder(nn.Module):
         B, C, L = x.shape
         P = self.patch_size
 
-        # Pad sequence so it is at least one full patch long
-        if L < P:
-            x = F.pad(x, (0, P - L))
-            L = P
-
         x_p = x.reshape(B * C, 1, L).unfold(-1, P, P).squeeze(1)
         x_p = self.patch_norm(self.patch_embed(x_p))  # (B*C, n_patches, d_model)
 
@@ -768,6 +763,17 @@ class SignalingModelV4(nn.Module):
 
 if __name__ == "__main__":
     import torch
+    from src.services.signaling.dl import SignalingDataLoader
+
+    dl=SignalingDataLoader({
+        "equity": "AAPL",
+        "time_frequency": "1min",
+        "observation_horizon": 1000,
+        "prediction_horizon": 240,
+        "news_observation_horizon": 1240,
+        "news_retrieval_prompt": "Fetch news articles related to {equity} in the last {news_observation_horizon} hours.",
+        "news_resources": ["finnhub"],
+    })
 
     print("=" * 50)
     print("  SignalingModelV4 — Smoke Test")
@@ -802,6 +808,7 @@ if __name__ == "__main__":
 
     # 1 — forward
     pred, z_fused = model(ts, doc_emb, doc_mask)
+
     assert pred.shape    == (B, CFG["n_classes"])
     assert z_fused.shape == (B, CFG["d_model"])
     assert not torch.isnan(pred).any()
@@ -823,14 +830,17 @@ if __name__ == "__main__":
     model.fit(dataloader)
     print("  ✅  fit loop")
 
+
+    ts,ctx,mask = dl.fetch_inference_data()
+    print(f"  fetched inference data: ts={ts.shape}  ctx={ctx.shape}  mask={mask.shape}")
     # 5 — inference
     model.eval()
     result = model.inference(
-        input_data=(ts, doc_emb, doc_mask),
+        input_data=(ts, ctx, mask),
         confidence_level=0.0,
     )
     assert result["estimated_action"] in ("BUY", "SELL", "hold")
-    assert abs(sum(result["probabilities"].values()) - 1.0) < 1e-4
+    assert abs(sum(result.get("probabilities", {}).values()) - 1.0) < 1e-4
     print(f"  ✅  inference      action={result['estimated_action']}  "
           f"p={result['probability']:.3f}")
 
